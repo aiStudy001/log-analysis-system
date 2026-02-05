@@ -41,36 +41,67 @@
 
 ## 🏗️ LangGraph Workflow
 
-### 5-Node 상태 머신 다이어그램
+### 8-Node 상태 머신 다이어그램
 
 ```mermaid
 stateDiagram-v2
-    [*] --> retrieve_schema: START
+    [*] --> resolve_context: START (Feature #2)
 
-    retrieve_schema --> generate_sql: 스키마 + 샘플 데이터
+    resolve_context --> extract_filters: 맥락 해석 (~500ms LLM)
 
-    generate_sql --> validate_sql: 생성된 SQL
+    extract_filters --> clarifier: 필터 추출 (~1s LLM)
+
+    clarifier --> retrieve_schema: 재질문 없음
+    clarifier --> [*]: 재질문 필요 (사용자 응답 대기)
+
+    retrieve_schema --> generate_sql: 스키마 + 샘플 (~100ms)
+
+    generate_sql --> validate_sql: SQL 생성 (~2s LLM)
 
     validate_sql --> execute_query: ✅ 유효함
     validate_sql --> generate_sql: ❌ 무효 (재시도 < 3)
     validate_sql --> [*]: ❌ 최대 재시도 초과
 
-    execute_query --> generate_insight: ✅ 실행 성공
+    execute_query --> generate_insight: ✅ 실행 성공 (~50ms)
     execute_query --> [*]: ❌ 실행 실패
 
-    generate_insight --> [*]: END
+    generate_insight --> [*]: 인사이트 생성 (~2s LLM)
+
+    note right of resolve_context
+        NEW Node 0
+        대화 맥락 분석 (LLM)
+        참조 해석, Focus 추적
+        ~500ms
+    end note
+
+    note right of extract_filters
+        NEW Node 1
+        LLM 필터 추출
+        서비스 + 시간 범위
+        ~1s
+    end note
+
+    note right of clarifier
+        NEW Node 2
+        재질문 판단 (LLM)
+        집계 vs 필터 구분
+        ~1s
+    end note
 ```
 
 ### 노드별 지연 시간
 
-| Node | Time | Description |
-|------|------|-------------|
-| **retrieve_schema** | ~100ms | PostgreSQL 스키마 + 샘플 데이터 조회 |
-| **generate_sql** | ~2s | Claude Sonnet 4.5로 SQL 생성 |
-| **validate_sql** | ~10ms | SQL 구문 검증 + 안전성 체크 |
-| **execute_query** | ~50ms | PostgreSQL에서 쿼리 실행 |
-| **generate_insight** | ~2s | Claude로 한국어 분석 생성 |
-| **Total** | **~4-5s** | 전체 응답 시간 |
+| Node | Time | Description | LLM Call |
+|------|------|-------------|----------|
+| **resolve_context** | ~500ms | 대화 맥락 분석 + 참조 해석 | ✅ Claude |
+| **extract_filters** | ~1s | 서비스 + 시간 범위 필터 추출 | ✅ Claude |
+| **clarifier** | ~1s | 재질문 필요 여부 판단 (조건부) | ✅ Claude |
+| **retrieve_schema** | ~100ms | PostgreSQL 스키마 + 샘플 데이터 조회 | ❌ |
+| **generate_sql** | ~2s | SQL 쿼리 생성 | ✅ Claude |
+| **validate_sql** | ~10ms | SQL 구문 검증 + 안전성 체크 | ❌ |
+| **execute_query** | ~50ms | PostgreSQL에서 쿼리 실행 | ❌ |
+| **generate_insight** | ~2s | 한국어 인사이트 분석 생성 | ✅ Claude |
+| **Total** | **~6-7s** | 전체 응답 시간 (4회 LLM 호출) | 4-5회 |
 
 ### 워크플로우 코드 예시
 
@@ -312,6 +343,172 @@ export class WSClient {
 **비즈니스 임팩트**:
 - 사용자 만족도 **4.8/5.0** (기존 3.0/5.0)
 - 쿼리 중단률 **80% 감소** (기존 40% → 8%)
+
+---
+
+## 🎯 Advanced Features Implementation
+
+### Feature #1: Query Result Cache ✅
+**Status**: Fully Implemented
+**Location**: `app/services/cache_service.py`
+
+**기능**:
+- **TTL**: 300초 (5분) 자동 만료
+- **LRU Eviction**: access_count 기반 최소 사용 항목 제거
+- **Max Size**: 100 entries
+- **Invalidation**: 새 로그 삽입 시 전체 캐시 초기화
+- **Singleton Pattern**: asyncio.Lock으로 스레드 안전성 보장
+
+**Cache Hit Flow**:
+1. Generate cache key (SHA256 of question + max_results)
+2. Check cache → Hit? Return cached result with badge
+3. Miss? Execute query → Store in cache → Return result
+
+**Cache Stats Endpoint**: `GET /api/cache/stats`
+
+**Performance**:
+- Cache hit: <10ms 응답
+- Cache miss: ~6-7초 (정상 쿼리 실행)
+
+---
+
+### Feature #2: Context-Aware Agent ✅
+**Status**: Fully Implemented
+**Location**: `app/agent/context_resolver.py`, `app/services/conversation_service.py`
+
+**기능**:
+- **Reference Resolution**: "그 에러", "그 서비스" → 구체적 엔티티 (ALWAYS LLM 호출, ~500ms)
+- **Focus Tracking**: Extracts service, error_type, time_range from SQL
+- **Conversation Memory**: Last 10 turns, 3-turn context for LLM
+- **Always Active**: Every query runs through context analysis
+
+**Example**:
+```
+Turn 1: "payment-api 에러 로그"
+  → Focus: {service: "payment-api"}
+
+Turn 2: "그 서비스의 최근 1시간 로그는?"
+  → Original: "그 서비스의 최근 1시간 로그는?"
+  → Resolved: "payment-api의 최근 1시간 로그는?"
+  → Context resolution applied
+  → Maintains service focus from previous turn
+```
+
+**Implementation Details**:
+- `ConversationService`: Manages sessions with history
+- `ConversationTurn`: Stores question, SQL, result_count, focus
+- `extract_focus_entities()`: Regex-based service/error/time extraction from SQL
+- `CONTEXT_AWARE_ANALYSIS_PROMPT`: LLM prompt with history + focus
+
+---
+
+### Feature #3: Multi-Step Reasoning ⚠️
+**Status**: Partially Implemented (LLM clarification only)
+**Location**: `app/agent/clarifier.py`
+
+**Implemented**:
+- **LLM Query Analysis**: Extracts service, time, query type (~1s)
+- **Clarification Questions**: Missing info detection (서비스? 시간?)
+- **Aggregation Detection**: GROUP BY vs WHERE classification
+- **Max Attempts**: 2 clarifications (infinite loop prevention)
+- **Dynamic Service List**: SELECT DISTINCT service FROM logs
+- **Time Range Modal**: "사용자 지정..." option for custom time input
+
+**Clarification Triggers**:
+1. **Service Missing** (filter query + no service):
+   - Fetches available services from DB dynamically
+   - Options: [Real service list from DB] + "전체"
+
+2. **Time Ambiguous** ("조금 전", "얼마 전"):
+   - Options: "최근 1시간" ~ "최근 7일" + "사용자 지정..."
+   - Custom time → Opens TimeRangeModal in frontend
+
+**Aggregation Query Logic**:
+- "서비스별", "시간대별" → is_aggregation=true → Skip service clarification
+- Prevents unnecessary clarifications for aggregate queries
+
+**NOT Implemented**:
+- Complex query decomposition (multi-step execution plans)
+- Sequential sub-query execution with progress tracking
+- Intermediate result aggregation
+
+**Example**:
+```
+Question: "에러 로그 조회"
+  → Analysis: service_type="none", is_filter_query=true
+  → Clarification: "어떤 서비스의 로그를 분석할까요?"
+  → Options: ["payment-api", "order-api", "user-api", "전체"]
+
+Question: "서비스별 에러 통계"
+  → Analysis: service_type="aggregation", is_aggregation=true
+  → Clarification: SKIP (aggregation query analyzes all services)
+```
+
+---
+
+### Feature #4: Tool Selection ⚠️
+**Status**: Minimal Implementation (NOT integrated)
+**Location**: `app/agent/tool_selector.py` (NOT in graph.py workflow)
+
+**Pattern Matching**:
+- **SQL**: ✅ Fully implemented (default)
+- **grep**: ❌ Placeholder (fallback to SQL)
+- **metrics**: ❌ Placeholder (fallback to SQL)
+
+**Issue**: `tool_selector_node` exists but NOT added to `create_sql_agent()` workflow
+- Code exists but is **dead code** (not called)
+- All queries currently route to SQL only
+
+**Future Integration**:
+- Add tool_selector_node to graph.py workflow
+- Implement grep (pattern matching queries)
+- Implement metrics (aggregation/statistics queries)
+
+---
+
+### Feature #5: Alerting & Monitoring ✅
+**Status**: Fully Implemented (manual trigger)
+**Location**: `app/services/alerting_service.py`, `app/controllers/alerts.py`
+
+**Anomaly Detection (3 types)**:
+
+1. **Error Rate Spike**:
+   - Compares current (last 5 min) vs baseline (30-35 min ago)
+   - Threshold: >10% increase
+   - Severity: critical (>50%), warning (10-50%)
+
+2. **Slow APIs**:
+   - Duration > 2 seconds
+   - Min occurrences: 3 in last 10 minutes
+   - Returns: Top 5 slow APIs
+
+3. **Service Down**:
+   - No logs for 5 minutes
+   - Checks: All active services from last hour
+   - Alert: List of down services
+
+**Alert History**: Keeps last 100 alerts
+
+**Endpoints**:
+- `POST /api/alerts/check` - Manual anomaly detection trigger
+- `GET /api/alerts/history` - Recent alerts (last 20)
+
+**TODO**:
+- Background scheduler (5-minute intervals)
+- WebSocket broadcast integration for real-time alerts
+
+---
+
+### Feature #6: Query Optimization ❌
+**Status**: NOT Implemented
+
+**Planned Features** (not in codebase):
+- Complexity analysis (SELECT depth, JOIN count)
+- Execution strategy selection (indexed scan vs seq scan)
+- Index suggestion based on WHERE clauses
+- Query rewriting for performance
+
+**Current Implementation**: Only safety validation (SELECT-only, dangerous keyword blocking)
 
 ---
 

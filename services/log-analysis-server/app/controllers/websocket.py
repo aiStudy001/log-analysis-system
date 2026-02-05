@@ -51,7 +51,8 @@ async def websocket_query(websocket: WebSocket):
                 question = data.get("question")
                 max_results = data.get("max_results", 100)
                 conversation_id = data.get("conversation_id", "default")  # Feature #2
-                print(f"📝 Starting query: question='{question}', max_results={max_results}")  # DEBUG
+                time_range_structured = data.get("time_range_structured")  # NEW: Flexible time range
+                print(f"📝 Starting query: question='{question}', max_results={max_results}, time_range_structured={time_range_structured}")  # DEBUG
 
                 # Cancel previous task if running
                 if task and not task.done():
@@ -64,7 +65,7 @@ async def websocket_query(websocket: WebSocket):
                 # Start new streaming query with conversation_id
                 print(f"🚀 Creating stream_query task...")  # DEBUG
                 task = asyncio.create_task(
-                    stream_query(websocket, question, max_results, conversation_id)
+                    stream_query(websocket, question, max_results, conversation_id, time_range_structured)
                 )
                 print(f"✅ Task created: {task}")  # DEBUG
 
@@ -101,7 +102,13 @@ async def websocket_query(websocket: WebSocket):
             active_connections.remove(websocket)
 
 
-async def stream_query(websocket: WebSocket, question: str, max_results: int, conversation_id: str = "default"):
+async def stream_query(
+    websocket: WebSocket,
+    question: str,
+    max_results: int,
+    conversation_id: str = "default",
+    time_range_structured: dict = None
+):
     """
     Stream agent execution to WebSocket (meal-planner pattern)
 
@@ -110,6 +117,7 @@ async def stream_query(websocket: WebSocket, question: str, max_results: int, co
         question: User's natural language question
         max_results: Maximum number of results
         conversation_id: Conversation session ID (Feature #2)
+        time_range_structured: Optional structured time range from frontend
     """
     print(f"🎬 stream_query STARTED: question='{question}'")  # DEBUG
     try:
@@ -122,7 +130,7 @@ async def stream_query(websocket: WebSocket, question: str, max_results: int, co
         # Stream events with conversation context
         print(f"🔄 Starting stream_query_execution...")  # DEBUG
         async for event in stream_query_execution(
-            question, max_results, schema_repo, query_repo, conversation_id
+            question, max_results, schema_repo, query_repo, conversation_id, time_range_structured
         ):
             print(f"📤 Sending event: {event.get('type', 'unknown')}")  # DEBUG
             await websocket.send_json(event)

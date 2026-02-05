@@ -28,48 +28,77 @@ log-analysis-server는 **LangGraph 기반 Text-to-SQL 에이전트**를 구현�
 
 ```mermaid
 stateDiagram-v2
-    [*] --> RetrieveSchema
+    [*] --> ResolveContext
+
+    ResolveContext --> ExtractFilters: 맥락 해석 완료
+
+    ExtractFilters --> Clarifier: 필터 추출 완료
+
+    Clarifier --> RetrieveSchema: 재질문 없음
+    Clarifier --> [*]: 재질문 필요 (사용자 응답 대기)
 
     RetrieveSchema --> GenerateSQL: 스키마 + 샘플
 
-    GenerateSQL --> ValidateSQL: 생성된 SQL
+    GenerateSQL --> ValidateSQL: SQL 생성 완료
 
     ValidateSQL --> ExecuteQuery: ✅ 유효함
     ValidateSQL --> GenerateSQL: ❌ 무효 (재시도 < 3)
     ValidateSQL --> [*]: ❌ 최대 재시도 (3회)
 
-    ExecuteQuery --> GenerateInsight: ✅ 성공
+    ExecuteQuery --> GenerateInsight: ✅ 실행 성공
     ExecuteQuery --> [*]: ❌ 실행 실패
 
     GenerateInsight --> [*]: 최종 결과
 
+    note right of ResolveContext
+        NEW Node 0
+        대화 맥락 분석 (LLM)
+        참조 해석, Focus 추적
+        ~500ms
+    end note
+
+    note right of ExtractFilters
+        NEW Node 1
+        LLM 필터 추출
+        서비스 + 시간 범위
+        ~1s
+    end note
+
+    note right of Clarifier
+        NEW Node 2
+        재질문 판단 (LLM)
+        집계 vs 필터 구분
+        최대 2회 제한
+        ~1s
+    end note
+
     note right of RetrieveSchema
-        Node 1
+        Node 3
         DB 스키마 + 샘플 조회
         ~100ms
     end note
 
     note right of GenerateSQL
-        Node 2
+        Node 4
         Claude Sonnet 4.5
         SQL 생성
         ~2s
     end note
 
     note right of ValidateSQL
-        Node 3
+        Node 5
         안전성 + 문법 검증
         ~10ms
     end note
 
     note right of ExecuteQuery
-        Node 4
+        Node 6
         PostgreSQL 쿼리 실행
         ~50ms
     end note
 
     note right of GenerateInsight
-        Node 5
+        Node 7
         Claude 결과 분석
         ~2s
     end note
@@ -137,7 +166,195 @@ class AgentState(TypedDict):
 
 ## 노드 구현
 
-### Node 1: retrieve_schema_node
+### Node 0: resolve_context_node (Feature #2) 🆕
+
+**목적**: 대화 맥락을 활용하여 참조와 대명사를 구체적 엔티티로 해석 (ALWAYS LLM 호출)
+
+**입력 상태**:
+- `question`: 사용자의 원본 질문
+- `conversation_id`: 대화 세션 ID
+- `conversation_service`: ConversationService 인스턴스 (graph.py에서 주입)
+
+**처리 과정**:
+1. conversation_service에서 세션 컨텍스트 조회 (focus + history)
+2. CONTEXT_AWARE_ANALYSIS_PROMPT로 **LLM 항상 호출** (비용 발생)
+3. 대화 히스토리 (최근 3턴) + 현재 focus를 프롬프트에 포함
+4. "그 에러", "그 서비스", "더 자세히" 등 참조 해석
+5. 원본과 비교하여 resolution_needed 판단
+
+**출력 상태**:
+- `resolved_question`: 해석된 질문 (변경 없으면 원본과 동일)
+- `current_focus`: {service, error_type, time_range} 현재 포커스
+- `events`: context_resolved 이벤트 (llm_prompt, llm_response 포함)
+
+**구현 위치**: `app/agent/context_resolver.py:100-148`
+
+**실행 시간**: ~500ms (LLM 호출)
+
+**예시**:
+```
+Turn 1: "payment-api 에러 로그"
+  → Focus: {service: "payment-api"}
+  → Resolved: "payment-api 에러 로그" (변경 없음)
+
+Turn 2: "그 서비스의 최근 1시간 로그는?"
+  → LLM 분석 with focus: {service: "payment-api"}
+  → Resolved: "payment-api의 최근 1시간 로그는?"
+  → resolution_needed: true
+```
+
+**Focus 추출** (extract_focus_entities):
+- SQL 정규식 매칭으로 service, error_type, time_range 추출
+- 다음 턴에서 참조 해석에 사용됨
+
+---
+
+### Node 1: extract_filters_node 🆕
+
+**목적**: LLM으로 자연어에서 구조화된 필터 추출 (서비스 + 시간)
+
+**입력 상태**:
+- `resolved_question`: Node 0에서 해석된 질문
+- `time_range_structured`: 프론트엔드에서 명시적으로 전달된 시간 범위 (Optional)
+
+**우선순위**:
+1. **time_range_structured** (프론트엔드 모달) - 검증 후 우선 사용
+2. **LLM 자동 추출** - 자연어 표현 → 구조화된 TimeRangeStructured
+
+**처리 과정**:
+1. time_range_structured가 있으면 유효성 검증 (`validate_time_range_structured`)
+2. LLM 프롬프트 생성 (시간 있으면 서비스만, 없으면 서비스+시간)
+3. Claude 호출로 JSON 응답 파싱
+4. extracted_service, extracted_time_range_structured 추출
+5. extraction_confidence 계산 (0-1)
+
+**지원 시간 표현**:
+- **상대**: "최근 3시간" → `{type: "relative", relative: {value: 3, unit: "h"}}`
+- **절대**: "2025-01-01 ~ 2025-01-31" → `{type: "absolute", absolute: {start: "2025-01-01", end: "2025-01-31"}}`
+- **자연어**: "작년", "이번 달", "지난주" → 오늘 날짜 기반 계산
+- **모호**: "최근", "방금", "조금 전" → `{type: "relative", relative: {value: 1, unit: "h"}}`
+
+**유효성 검증**:
+- Relative limits: h(1-720), d(1-365), w(1-52), m(1-12)
+- Absolute: start < end, end <= now, range <= 1 year
+
+**출력 상태**:
+- `extracted_service`: 서비스명 (null 가능)
+- `extracted_time_range_structured`: 구조화된 시간 범위
+- `extraction_confidence`: 추출 신뢰도 (0-1)
+- `events`: filters_extracted 이벤트 (llm_prompt, llm_response 포함)
+
+**구현 위치**: `app/agent/filter_extractor.py:66-297`
+
+**실행 시간**: ~1s (LLM 호출)
+
+**예시**:
+```
+Question: "payment-api의 최근 3시간 에러"
+  → extracted_service: "payment-api"
+  → extracted_time_range_structured: {
+      type: "relative",
+      relative: {value: 3, unit: "h"},
+      absolute: null
+    }
+  → extraction_confidence: 0.9
+
+Question: "작년 order-api 로그"
+  → extracted_service: "order-api"
+  → extracted_time_range_structured: {
+      type: "absolute",
+      relative: null,
+      absolute: {start: "2024-01-01", end: "2024-12-31"}
+    }
+  → extraction_confidence: 0.85
+```
+
+---
+
+### Node 2: clarifier_node (Feature #3) 🆕
+
+**목적**: LLM 분석으로 재질문 필요 여부 판단 (집계 vs 필터 구분)
+
+**입력 상태**:
+- `resolved_question`: 해석된 질문
+- `clarification_count`: 재질문 횟수 (무한 루프 방지)
+
+**처리 과정**:
+1. **재질문 횟수 체크**: clarification_count >= 2이면 건너뜀
+2. **LLM 분석**: 질문 유형 판단 (service_type, is_aggregation, time_clarity)
+3. **재질문 생성**:
+   - **서비스 누락** (필터 쿼리 + 서비스 없음): 동적 서비스 목록 조회
+   - **시간 모호** (ambiguous 표현): 시간 선택지 제공
+4. clarifications_needed 배열 생성
+
+**재질문 트리거**:
+
+1. **서비스 재질문** (needs_service_clarification=true):
+   - 조건: is_filter_query=true AND service_type="none"
+   - 동적 서비스 목록: `SELECT DISTINCT service FROM logs`
+   - 옵션: [Real DB services] + "전체"
+   - 집계 쿼리는 건너뜀 (전체 서비스 분석이므로)
+
+2. **시간 재질문** (needs_time_clarification=true):
+   - 조건: time_clarity="ambiguous" ("조금 전", "얼마 전")
+   - 옵션: "최근 1시간" ~ "최근 7일" + **"사용자 지정..."** (모달 트리거)
+   - allow_custom=true로 프론트엔드에 모달 지원 알림
+
+**집계 쿼리 판단**:
+```
+"서비스별 에러 통계"
+  → service_type="aggregation", is_aggregation=true
+  → needs_service_clarification=false (전체 서비스 분석)
+
+"payment-api 에러 로그"
+  → service_type="specific", is_filter_query=true
+  → needs_service_clarification=false (서비스 명시)
+
+"에러 로그 조회"
+  → service_type="none", is_filter_query=true
+  → needs_service_clarification=true (서비스 누락)
+```
+
+**제한**: 최대 2회 재질문 (무한 루프 방지)
+
+**출력 상태**:
+- `clarifications_needed`: 재질문 배열 (비어있으면 건너뜀)
+- `clarification_count`: 재질문 횟수 증가
+- `query_analysis`: LLM 분석 결과 (service_type, is_aggregation 등)
+- `events`: clarification_needed OR clarification_skipped 이벤트
+
+**조건부 라우팅** (route_after_clarification):
+- clarifications_needed 있음 → END (사용자 응답 대기)
+- clarifications_needed 없음 → retrieve_schema (정상 진행)
+
+**구현 위치**: `app/agent/clarifier.py:43-249`
+
+**실행 시간**: ~1s (LLM 호출)
+
+**재질문 예시**:
+```json
+[
+  {
+    "type": "missing_info",
+    "field": "service",
+    "question": "어떤 서비스의 로그를 분석할까요?",
+    "options": ["payment-api", "order-api", "user-api", "전체"],
+    "required": false
+  },
+  {
+    "type": "ambiguous_time",
+    "field": "time",
+    "question": "시간 범위를 명확히 해주세요",
+    "options": ["최근 1시간", "최근 6시간", "최근 24시간", "사용자 지정..."],
+    "required": true,
+    "allow_custom": true
+  }
+]
+```
+
+---
+
+### Node 3: retrieve_schema_node
 
 **목적**: SQL 생성을 위한 컨텍스트를 제공하기 위해 데이터베이스 스키마와 샘플 데이터를 가져옵니다.
 
@@ -181,14 +398,14 @@ Sample Data (Recent 3 logs):
 
 ---
 
-### Node 2: generate_sql_node
+### Node 4: generate_sql_node
 
 **목적**: Claude Sonnet 4.5를 사용하여 자연어 질문에서 SQL 쿼리를 생성합니다.
 
 **입력 상태**:
 - `question`: 사용자의 자연어 질문
-- `schema_info`: Node 1의 데이터베이스 스키마
-- `sample_data`: Node 1의 샘플 로그
+- `schema_info`: Node 3의 데이터베이스 스키마
+- `sample_data`: Node 3의 샘플 로그
 
 **LLM 설정**:
 - 모델: `claude-sonnet-4-5-20250929`
@@ -236,12 +453,12 @@ LIMIT 100;
 
 ---
 
-### Node 3: validate_sql_node
+### Node 5: validate_sql_node
 
 **목적**: 생성된 SQL의 안전성과 문법 정확성을 검증합니다.
 
 **입력 상태**:
-- `generated_sql`: Node 2의 SQL 쿼리
+- `generated_sql`: Node 4의 SQL 쿼리
 
 **처리 과정**:
 1. **안전성 검증** (`validate_sql_safety`):
@@ -290,7 +507,7 @@ SELECT * FROM logs WHERE
 
 ---
 
-### Node 4: execute_query_node
+### Node 6: execute_query_node
 
 **목적**: PostgreSQL 데이터베이스에 대해 검증된 SQL 쿼리를 실행합니다.
 
@@ -346,7 +563,7 @@ formatted_results = {
 
 ---
 
-### Node 5: generate_insight_node
+### Node 7: generate_insight_node
 
 **목적**: Claude를 사용하여 쿼리 결과에 대한 사람이 읽을 수 있는 분석을 생성합니다.
 
@@ -599,14 +816,22 @@ sequenceDiagram
 
 ### 시간 분석
 
-| 단계 | 소요 시간 | 병목? |
-|------|----------|------|
-| 스키마 조회 | ~100ms | ❌ |
-| SQL 생성 | ~2초 | ✅ (Claude API) |
-| 검증 | ~10ms | ❌ |
-| 쿼리 실행 | ~50ms | ❌ |
-| 인사이트 생성 | ~2초 | ✅ (Claude API) |
-| **총합** | **~4-5초** | **2회 LLM 호출** |
+| 단계 | 소요 시간 | 병목? | LLM 호출 |
+|------|----------|------|----------|
+| **맥락 해석** (Node 0) | ~500ms | ✅ | ✅ Claude |
+| **필터 추출** (Node 1) | ~1s | ✅ | ✅ Claude |
+| **재질문 판단** (Node 2) | ~1s | ✅ | ✅ Claude |
+| 스키마 조회 (Node 3) | ~100ms | ❌ | ❌ |
+| SQL 생성 (Node 4) | ~2s | ✅ | ✅ Claude |
+| 검증 (Node 5) | ~10ms | ❌ | ❌ |
+| 쿼리 실행 (Node 6) | ~50ms | ❌ | ❌ |
+| 인사이트 생성 (Node 7) | ~2s | ✅ | ✅ Claude |
+| **총합** | **~6-7초** | **5회 LLM 호출** | **4-5회** |
+
+**참고**:
+- 재질문(Node 2)은 조건부로 실행 (필요 시만 추가 1초)
+- 총 LLM 호출 수: 4-5회 (재질문 포함 여부에 따라)
+- 비용: ~$0.01-0.02 per query (토큰 사용량에 따름)
 
 ### 최적화 기회
 

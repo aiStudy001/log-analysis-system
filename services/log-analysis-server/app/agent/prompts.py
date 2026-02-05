@@ -20,7 +20,10 @@ SQL_GENERATION_PROMPT = """You are an expert PostgreSQL database analyst special
    - idx_trace: (trace_id)
 4. Always add `ORDER BY created_at DESC` for time-series data
 5. Limit results to prevent overload (MAX {max_results})
-6. Use `NOW() - INTERVAL '...'` for time filtering
+6. Use `NOW() - INTERVAL '...'` for relative time filtering, or absolute dates for date ranges:
+   - Relative: `WHERE created_at > NOW() - INTERVAL '3 hours'`
+   - Absolute: `WHERE created_at >= '2025-01-01'::timestamptz AND created_at < '2025-02-01'::timestamptz`
+   - **Important**: For absolute dates, use `< next_day` instead of `<= end_date` to include the entire end day
 7. For JSONB metadata queries, use `->>` for text or `->` for JSON
 
 # Field Descriptions
@@ -172,6 +175,67 @@ ORDER BY service, count DESC;
 - Always add WHERE filters BEFORE GROUP BY
 - Always include ORDER BY for aggregated results
 - Use LIMIT to prevent returning too many rows
+
+# Advanced Time Range Examples (확장된 시간 범위 예제)
+
+**Example 9: Custom Relative Time (사용자 지정 상대 시간)**
+Q: "최근 3시간 payment-api 에러 로그"
+A:
+```sql
+SELECT id, created_at, service, level, message
+FROM logs
+WHERE service = 'payment-api'
+  AND level = 'ERROR'
+  AND created_at > NOW() - INTERVAL '3 hours'
+  AND deleted = FALSE
+ORDER BY created_at DESC
+LIMIT 100;
+```
+
+**Example 10: Absolute Date Range (절대 날짜 범위)**
+Q: "2025년 1월 1일부터 1월 31일까지 전체 서비스 에러 로그"
+A:
+```sql
+SELECT id, created_at, service, level, message
+FROM logs
+WHERE level = 'ERROR'
+  AND created_at >= '2025-01-01 00:00:00'::timestamptz
+  AND created_at < '2025-02-01 00:00:00'::timestamptz
+  AND deleted = FALSE
+ORDER BY created_at DESC
+LIMIT 100;
+```
+
+**Example 11: Natural Language Date Expression (자연어 날짜 표현 - 작년)**
+Q: "작년 payment-api 트래픽 분석"
+A:
+```sql
+SELECT
+  DATE_TRUNC('month', created_at) AS month,
+  COUNT(*) as request_count
+FROM logs
+WHERE service = 'payment-api'
+  AND created_at >= '2024-01-01 00:00:00'::timestamptz
+  AND created_at < '2025-01-01 00:00:00'::timestamptz
+  AND deleted = FALSE
+GROUP BY month
+ORDER BY month;
+```
+
+**Example 12: Custom Relative Time (2 weeks)**
+Q: "최근 2주 전체 서비스 트래픽 추이"
+A:
+```sql
+SELECT
+  DATE_TRUNC('day', created_at) AS day,
+  service,
+  COUNT(*) as log_count
+FROM logs
+WHERE created_at > NOW() - INTERVAL '2 weeks'
+  AND deleted = FALSE
+GROUP BY day, service
+ORDER BY day DESC, service;
+```
 
 # User Question
 {question}

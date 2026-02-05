@@ -4,8 +4,27 @@ LangGraph 상태 정의
 Text-to-SQL 워크플로우의 상태를 관리합니다.
 """
 
-from typing import TypedDict, Annotated, Sequence
+from typing import TypedDict, Annotated, Sequence, Optional
 from operator import add
+
+
+class TimeRangeRelative(TypedDict):
+    """상대 시간 범위 (최근 N시간/일/주/월)"""
+    value: int
+    unit: str  # 'h' | 'd' | 'w' | 'm'
+
+
+class TimeRangeAbsolute(TypedDict):
+    """절대 날짜 범위 (YYYY-MM-DD ~ YYYY-MM-DD)"""
+    start: str  # ISO 8601 date string (e.g., "2025-01-01")
+    end: str    # ISO 8601 date string (e.g., "2025-01-31")
+
+
+class TimeRangeStructured(TypedDict):
+    """구조화된 시간 범위 (프론트엔드에서 전달)"""
+    type: Optional[str]  # 'relative' | 'absolute' | None
+    relative: Optional[TimeRangeRelative]
+    absolute: Optional[TimeRangeAbsolute]
 
 
 class AgentState(TypedDict):
@@ -50,8 +69,12 @@ class AgentState(TypedDict):
 
     # Filter extraction (LLM-based)
     extracted_service: str           # LLM이 추출한 서비스명
-    extracted_time_range: str        # LLM이 추출한 시간 범위
+    extracted_time_range: str        # LLM이 추출한 시간 범위 (DEPRECATED: use extracted_time_range_structured)
+    extracted_time_range_structured: TimeRangeStructured  # LLM이 추출한 구조화된 시간 범위
     extraction_confidence: float     # 추출 신뢰도 (0-1)
+
+    # Structured input (프론트엔드에서 명시적으로 전달된 필터)
+    time_range_structured: Optional[TimeRangeStructured]  # 사용자가 모달에서 선택한 시간 범위
 
     # Clarification (재질문)
     clarifications_needed: list      # 필요한 재질문 목록

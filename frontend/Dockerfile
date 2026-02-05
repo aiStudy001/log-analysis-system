@@ -17,10 +17,12 @@ RUN pnpm install --no-frozen-lockfile
 # Copy source code
 COPY . .
 
+# Copy production environment file (excluded by .dockerignore)
+COPY .env.production .env.production
+
 # Build for production
 # API URL set to /api (nginx will proxy to backend)
-ENV VITE_API_URL=/api
-RUN pnpm run build
+RUN cat .env.production && VITE_API_URL=/api pnpm run build --mode production
 
 # ============================================
 # Stage 2: Serve with Nginx

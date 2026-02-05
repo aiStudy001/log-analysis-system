@@ -19,7 +19,8 @@ def build_initial_state(
     max_results: int,
     cache_key: str = "",
     cache_hit: bool = False,
-    conversation_id: str = "default"
+    conversation_id: str = "default",
+    time_range_structured: dict = None
 ) -> AgentState:
     """
     Build initial agent state
@@ -30,6 +31,7 @@ def build_initial_state(
         cache_key: Cache key for this query (Feature #1)
         cache_hit: Whether this is a cache hit (Feature #1)
         conversation_id: Conversation session ID (Feature #2)
+        time_range_structured: Optional structured time range from frontend
 
     Returns:
         Initial AgentState with default values
@@ -53,7 +55,8 @@ def build_initial_state(
         "cache_key": cache_key,
         "conversation_id": conversation_id,  # Feature #2
         "resolved_question": question,       # Feature #2 (default to original)
-        "current_focus": {}                  # Feature #2
+        "current_focus": {},                 # Feature #2
+        "time_range_structured": time_range_structured  # NEW: Flexible time range
     }
 
 
@@ -205,7 +208,8 @@ async def stream_query_execution(
     max_results: int,
     schema_repo,
     query_repo,
-    conversation_id: str = "default"
+    conversation_id: str = "default",
+    time_range_structured: dict = None
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
     Stream agent execution events (meal-planner pattern)
@@ -224,6 +228,7 @@ async def stream_query_execution(
         schema_repo: SchemaRepository instance
         query_repo: QueryRepository instance
         conversation_id: Conversation session ID (Feature #2)
+        time_range_structured: Optional structured time range from frontend
 
     Yields:
         Event dicts for client consumption
@@ -251,7 +256,8 @@ async def stream_query_execution(
         max_results,
         cache_key=cache_key,
         cache_hit=False,
-        conversation_id=conversation_id  # Feature #2
+        conversation_id=conversation_id,  # Feature #2
+        time_range_structured=time_range_structured  # NEW: Flexible time range
     )
 
     # 3. Create agent with injected repositories and conversation service (Feature #2)

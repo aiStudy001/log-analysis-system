@@ -1,25 +1,115 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte'
-  import { marked } from 'marked'
   import { chatStore } from '../lib/stores/chat'
   import { historyStore } from '../lib/stores/history'
   import { QueryWebSocket, type StreamEvent } from '../lib/api/websocket'
   import ServiceFilter from '../lib/components/ServiceFilter.svelte'
+  import TimeRangeModal from '../lib/components/TimeRangeModal.svelte'  // NEW
+  import type { TimeRangeValue, TimeRangeStructured } from '$lib/types'  // NEW
   import ConversationContext from '../lib/components/ConversationContext.svelte'
   import TaskHistoryPanel from '$lib/components/TaskHistoryPanel.svelte'  // NEW: Task History
   import MultiStepProgress from '../lib/components/MultiStepProgress.svelte'  // Feature #3
   import AlertNotification from '../lib/components/AlertNotification.svelte'  // Feature #5
   import { alertStore } from '../lib/stores/alert'  // Feature #5
+  import { getApiUrl } from '$lib/config'
 
-  // Configure marked for safe HTML rendering
-  marked.setOptions({
-    breaks: true,  // Convert \n to <br>
-    gfm: true,     // GitHub Flavored Markdown
-  })
-
-  // Convert markdown to HTML
+  // Simple markdown renderer (replaces marked library for production builds)
   function renderMarkdown(markdown: string): string {
-    return marked.parse(markdown) as string
+    if (!markdown) return ''
+
+    let html = markdown
+      // Headers
+      .replace(/^### (.*$)/gim, '<h3>$1</h3>')
+      .replace(/^## (.*$)/gim, '<h2>$1</h2>')
+      .replace(/^# (.*$)/gim, '<h1>$1</h1>')
+      // Bold
+      .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+      .replace(/\_\_(.*?)\_\_/g, '<strong>$1</strong>')
+      // Italic
+      .replace(/\*(.*?)\*/g, '<em>$1</em>')
+      .replace(/\_(.*?)\_/g, '<em>$1</em>')
+      // Code blocks
+      .replace(/```(.*?)```/gs, '<pre><code>$1</code></pre>')
+      .replace(/`(.*?)`/g, '<code>$1</code>')
+      // Lists
+      .replace(/^\* (.*$)/gim, '<li>$1</li>')
+      .replace(/^- (.*$)/gim, '<li>$1</li>')
+      .replace(/^\d+\. (.*$)/gim, '<li>$1</li>')
+      // Links
+      .replace(/\[(.*?)\]\((.*?)\)/g, '<a href="$2">$1</a>')
+      // Line breaks
+      .replace(/\n\n/g, '</p><p>')
+      .replace(/\n/g, '<br>')
+
+    // Wrap lists
+    html = html.replace(/(<li>.*<\/li>)/s, '<ul>$1</ul>')
+
+    // Wrap in paragraph if not already wrapped
+    if (!html.startsWith('<')) {
+      html = '<p>' + html + '</p>'
+    }
+
+    return html
+  }
+
+  // Helper: Format time range for display (handles both string and object)
+  function formatTimeRangeDisplay(timeRange: string | TimeRangeStructured | any): string {
+    if (!timeRange) return ''
+
+    // If it's a preset string (1h, 6h, etc.), convert to Korean
+    if (typeof timeRange === 'string') {
+      const presetMap: Record<string, string> = {
+        '1h': '최근 1시간',
+        '2h': '최근 2시간',
+        '6h': '최근 6시간',
+        '12h': '최근 12시간',
+        '24h': '최근 24시간',
+        '48h': '최근 48시간',
+        '7d': '최근 7일',
+        'all': '전체',
+        'custom': '사용자 지정'
+      }
+      return presetMap[timeRange] || timeRange
+    }
+
+    // If it's a TimeRangeStructured object
+    if (typeof timeRange === 'object') {
+      if (timeRange.type === 'relative' && timeRange.relative) {
+        const unitMap: Record<string, string> = { h: '시간', d: '일', w: '주', m: '월' }
+        return `최근 ${timeRange.relative.value}${unitMap[timeRange.relative.unit]}`
+      } else if (timeRange.type === 'absolute' && timeRange.absolute) {
+        return `${timeRange.absolute.start} ~ ${timeRange.absolute.end}`
+      }
+    }
+
+    return String(timeRange)
+  }
+
+  // Helper: Compare LLM extracted time with dropdown time
+  function areTimesEqual(llmTime: any, dropdownValue: string, customValue: TimeRangeValue | null): boolean {
+    if (!llmTime) return false
+
+    if (dropdownValue === 'custom' && customValue) {
+      // 사용자 지정 값과 비교
+      const customStructured = buildTimeRangeStructured(customValue)
+      return JSON.stringify(llmTime) === JSON.stringify(customStructured)
+    }
+
+    // preset 값과 비교
+    const presetMap: Record<string, { value: number; unit: string }> = {
+      '1h': { value: 1, unit: 'h' },
+      '2h': { value: 2, unit: 'h' },
+      '6h': { value: 6, unit: 'h' },
+      '12h': { value: 12, unit: 'h' },
+      '24h': { value: 24, unit: 'h' },
+      '48h': { value: 48, unit: 'h' },
+      '7d': { value: 7, unit: 'd' }
+    }
+
+    const preset = presetMap[dropdownValue]
+    if (!preset || !llmTime?.relative) return false
+
+    return llmTime.relative.value === preset.value && llmTime.relative.unit === preset.unit
   }
 
   // NEW: Node to task title mapping for task history
@@ -79,9 +169,21 @@
   // Filter state
   let selectedService = 'all'
   let selectedTimeRange = 'all'
+  let customTimeRange: TimeRangeValue | null = null  // NEW: 사용자 지정 시간 범위
 
   // Clarification (재질문) - 메시지 기반
   let clarificationAnswers: Record<string, Record<string, string>> = {}  // {clarificationId: {q0: answer, q1: answer}}
+
+  // NEW: Clarification custom time range support
+  let showClarificationModal = false
+  let clarificationModalContext: { clarificationId: string; questionIndex: number } | null = null
+  let clarificationCustomTimeRange: TimeRangeValue | null = null
+
+  // Filter conflict data
+  let conflictData: {
+    service?: { user: string; ai: string }
+    timeRange?: { user: string; ai: any }
+  } | null = null
 
   // Table sorting state - per message
   let tableSortState: Record<string, { column: string; direction: 'asc' | 'desc' }> = {}
@@ -135,7 +237,7 @@
       case 'extract_filters':
         const filters = []
         if (data.service) filters.push(`서비스=${data.service}`)
-        if (data.time_range) filters.push(`시간=${data.time_range}`)
+        if (data.time_range) filters.push(`시간=${formatTimeRangeDisplay(data.time_range)}`)
         return filters.length > 0
           ? `필터 추출 완료: ${filters.join(', ')}`
           : '필터 추출 완료'
@@ -198,43 +300,77 @@
         if (service || timeRange) {
           // Check for conflicts with dropdown
           const hasDropdownService = selectedService !== 'all'
-          const hasDropdownTime = selectedTimeRange !== 'all'
+          const hasDropdownTime = selectedTimeRange !== 'all' || customTimeRange !== null
 
           const serviceConflict = service && hasDropdownService && service !== selectedService
-          const timeConflict = timeRange && hasDropdownTime && timeRange !== selectedTimeRange
+
+          // 시간 충돌: LLM이 추출한 시간과 드롭다운 값을 비교
+          const timeConflict = timeRange && hasDropdownTime && !areTimesEqual(timeRange, selectedTimeRange, customTimeRange)
 
           if (serviceConflict || timeConflict) {
-            // AI 추출 필터를 우선 사용 (자동 해결)
-            const conflictParts = []
+            // 충돌 감지 → 쿼리 취소 및 재질문 표시
+
+            // 1. 백엔드 쿼리 취소
+            if (wsClient) {
+              wsClient.cancel()
+            }
+
+            // 2. 로딩 상태 중지
+            chatStore.setLoading(false)
+            chatStore.clearStreaming()
+
+            // 3. 재질문 메시지 생성
+            const clarifications = []
+
             if (serviceConflict) {
-              conflictParts.push(`서비스: ${selectedService} → ${service}`)
-              selectedService = service
-            } else if (service) {
-              selectedService = service
+              clarifications.push({
+                question: '서비스 필터가 충돌합니다. 어느 것을 사용하시겠습니까?',
+                options: [
+                  `사용자 선택: ${selectedService}`,
+                  `AI 추출: ${service}`
+                ],
+                field: 'service_conflict',
+                required: true
+              })
             }
 
             if (timeConflict) {
-              conflictParts.push(`시간: ${selectedTimeRange} → ${timeRange}`)
-              selectedTimeRange = timeRange
-            } else if (timeRange) {
-              selectedTimeRange = timeRange
+              clarifications.push({
+                question: '시간 필터가 충돌합니다. 어느 것을 사용하시겠습니까?',
+                options: [
+                  `사용자 선택: ${formatTimeRangeDisplay(selectedTimeRange)}`,
+                  `AI 추출: ${formatTimeRangeDisplay(timeRange)}`
+                ],
+                field: 'time_conflict',
+                required: true
+              })
             }
 
-            chatStore.addStatusMessage(`⚠️ 필터 충돌 감지 - AI 추출 필터로 자동 적용: ${conflictParts.join(', ')}`)
+            // 4. 재질문 메시지 추가
+            chatStore.addClarificationMessage(clarifications)
+
+            // 5. 충돌 데이터 저장 (나중에 사용)
+            conflictData = {
+              service: serviceConflict ? { user: selectedService, ai: service } : undefined,
+              timeRange: timeConflict ? { user: selectedTimeRange, ai: timeRange } : undefined
+            }
+
+            setTimeout(scrollToBottom, 100)
           } else {
             // No conflict - apply extracted filters to dropdowns automatically
-            if (service) {
+            if (service && selectedService === 'all') {
               selectedService = service
             }
-            if (timeRange) {
-              selectedTimeRange = timeRange
-            }
+            // 시간 필터는 드롭다운이 'all'일 때만 상태 메시지 표시
+            // (드롭다운 자동 업데이트는 안 함 - preset 매핑 복잡도 때문)
 
             // Show extraction result
             const parts = []
             if (service) parts.push(`서비스: ${service}`)
-            if (timeRange) parts.push(`시간: ${timeRange}`)
-            chatStore.addStatusMessage(`🔍 필터 자동 적용: ${parts.join(', ')}`)
+            if (timeRange) parts.push(`시간: ${formatTimeRangeDisplay(timeRange)}`)
+            if (parts.length > 0) {
+              chatStore.addStatusMessage(`🔍 필터 자동 적용: ${parts.join(', ')}`)
+            }
           }
         }
         setTimeout(scrollToBottom, 100)
@@ -512,6 +648,27 @@
     }
   }
 
+  // NEW: Clarification modal handlers
+  function handleClarificationModalConfirm(timeRange: TimeRangeValue) {
+    if (!clarificationModalContext) return
+
+    const { clarificationId, questionIndex } = clarificationModalContext
+    const timeText = formatTimeRangeKorean(timeRange)
+
+    if (!clarificationAnswers[clarificationId]) {
+      clarificationAnswers[clarificationId] = {}
+    }
+    clarificationAnswers[clarificationId][`q${questionIndex}`] = timeText
+    clarificationCustomTimeRange = timeRange
+    showClarificationModal = false
+    clarificationModalContext = null
+  }
+
+  function handleClarificationModalCancel() {
+    showClarificationModal = false
+    clarificationModalContext = null
+  }
+
   function submitClarification(clarificationId: string, clarifications: any[]) {
     const answers = clarificationAnswers[clarificationId]
 
@@ -535,15 +692,55 @@
     clarifications.forEach((clarification, i) => {
       const answer = answers[`q${i}`]
       if (answer) {
-        // 답변을 자연어로 추가
-        if (clarification.field === 'service') {
+        // 필터 충돌 답변 처리
+        if (clarification.field === 'service_conflict' && conflictData?.service) {
+          const isUserChoice = answer.startsWith('사용자 선택')
+          selectedService = isUserChoice ? conflictData.service.user : conflictData.service.ai
+          chatStore.addStatusMessage(`✓ 서비스 필터: ${selectedService} 선택됨`)
+        } else if (clarification.field === 'time_conflict' && conflictData?.timeRange) {
+          const isUserChoice = answer.startsWith('사용자 선택')
+          const chosenValue = isUserChoice ? conflictData.timeRange.user : conflictData.timeRange.ai
+
+          if (!isUserChoice) {
+            // AI 추출 값 선택 시 → 드롭다운에 반영
+            updateDropdownFromTimeRange(chosenValue)
+          }
+          // isUserChoice면 드롭다운은 이미 설정되어 있음 (변경 없음)
+
+          chatStore.addStatusMessage(`✓ 시간 필터: ${formatTimeRangeDisplay(chosenValue)} 선택됨`)
+        }
+        // 일반 재질문 답변 처리
+        else if (clarification.field === 'service') {
+          // 서비스 선택 저장
           if (answer === '전체') {
-            // "전체" 선택 시 → "전체 서비스의 ..."
-            enhancedQuestion = `전체 서비스의 ${enhancedQuestion}`
+            selectedService = 'all'
           } else {
             // "payment-api (결제 처리)" → "payment-api"
-            const serviceName = answer.split(' ')[0]
-            enhancedQuestion = `${serviceName}의 ${enhancedQuestion}`
+            selectedService = answer.split(' ')[0]
+          }
+
+          // 질문 재구성 (시간 표현 제거 + 선택된 필터로 재구성)
+          let baseQuestion = lastUserMessage?.content || question
+
+          // 기존 시간 표현 제거
+          baseQuestion = baseQuestion.replace(/최근\s*\d+\s*(시간|일|주|개?월)/g, '')
+          baseQuestion = baseQuestion.replace(/^\d+시간\s*/g, '')
+          baseQuestion = baseQuestion.replace(/\s+/g, ' ').trim()
+
+          // 서비스 추가
+          if (selectedService !== 'all') {
+            enhancedQuestion = `${selectedService}의 ${baseQuestion}`
+          } else {
+            enhancedQuestion = `전체 서비스의 ${baseQuestion}`
+          }
+
+          // 시간 추가 (드롭다운에 선택된 값 사용)
+          if (customTimeRange) {
+            const timeText = formatTimeRangeKorean(customTimeRange)
+            enhancedQuestion = `${timeText} ${enhancedQuestion}`
+          } else if (selectedTimeRange !== 'all' && selectedTimeRange !== 'custom') {
+            const timeText = formatTimeRangeDisplay(selectedTimeRange)
+            enhancedQuestion = `${timeText} ${enhancedQuestion}`
           }
         } else if (clarification.field === 'time') {
           if (answer === '전체') {
@@ -558,13 +755,95 @@
       }
     })
 
-    // 향상된 질문으로 재실행
-    chatStore.addUserMessage(enhancedQuestion)
-    chatStore.setLoading(true)
-    chatStore.addStatusMessage(`📝 질문 보완: ${enhancedQuestion}`)
+    // 충돌 재질문인 경우: 필터만 업데이트하고 원래 질문 재실행
+    const isConflictClarification = conflictData !== null
 
-    currentQueryId = historyStore.addQuery(enhancedQuestion)
-    wsClient?.query(enhancedQuestion, 100, conversationId)
+    if (isConflictClarification) {
+      // 충돌 해결 완료 - 선택된 필터로 질문 재구성
+      chatStore.setLoading(true)
+      chatStore.addStatusMessage(`✓ 필터 충돌 해결됨 - 쿼리 재실행`)
+
+      // 원래 질문에서 기본 부분만 추출 (시간/서비스 제거)
+      let baseQuestion = lastUserMessage?.content || question
+
+      // 기존 시간 표현 제거
+      baseQuestion = baseQuestion.replace(/최근\s*\d+\s*(시간|일|주|개?월)/g, '')
+      baseQuestion = baseQuestion.replace(/^\d+시간\s*/g, '')
+      baseQuestion = baseQuestion.replace(/\s+/g, ' ').trim()
+
+      // 선택된 필터로 질문 재구성
+      let finalQuestion = baseQuestion
+
+      // 서비스 추가
+      if (selectedService !== 'all') {
+        if (!finalQuestion.includes(selectedService)) {
+          finalQuestion = `${selectedService}의 ${finalQuestion}`
+        }
+      }
+
+      // 시간 추가
+      if (customTimeRange) {
+        const timeText = formatTimeRangeKorean(customTimeRange)
+        finalQuestion = `${timeText} ${finalQuestion}`
+      } else if (selectedTimeRange !== 'all' && selectedTimeRange !== 'custom') {
+        const timeText = formatTimeRangeDisplay(selectedTimeRange)
+        finalQuestion = `${timeText} ${finalQuestion}`
+      }
+
+      currentQueryId = historyStore.addQuery(finalQuestion)
+
+      // 드롭다운 값을 백엔드에 전달 (사용자 지정 또는 preset)
+      let timeRangeStructured: TimeRangeStructured | null = null
+      if (customTimeRange) {
+        // 사용자 지정 시간
+        timeRangeStructured = buildTimeRangeStructured(customTimeRange)
+      } else if (selectedTimeRange !== 'all' && selectedTimeRange !== 'custom') {
+        // Preset 드롭다운 - 구조화된 형식으로 변환
+        const timeMap: Record<string, { value: number; unit: string }> = {
+          '1h': { value: 1, unit: 'h' },
+          '2h': { value: 2, unit: 'h' },
+          '6h': { value: 6, unit: 'h' },
+          '12h': { value: 12, unit: 'h' },
+          '24h': { value: 24, unit: 'h' },
+          '48h': { value: 48, unit: 'h' },
+          '7d': { value: 7, unit: 'd' }
+        }
+        const timeConfig = timeMap[selectedTimeRange]
+        if (timeConfig) {
+          timeRangeStructured = {
+            type: 'relative',
+            relative: {
+              value: timeConfig.value,
+              unit: timeConfig.unit
+            },
+            absolute: null
+          }
+        }
+      }
+
+      wsClient?.query(finalQuestion, 100, conversationId, timeRangeStructured)
+
+      // Clear conflict data
+      conflictData = null
+    } else {
+      // 일반 재질문: 향상된 질문으로 재실행
+      chatStore.addUserMessage(enhancedQuestion)
+      chatStore.setLoading(true)
+      chatStore.addStatusMessage(`📝 질문 보완: ${enhancedQuestion}`)
+
+      currentQueryId = historyStore.addQuery(enhancedQuestion)
+
+      // NEW: Include custom time range if set during clarification
+      let timeRangeStructured: TimeRangeStructured | null = null
+      if (clarificationCustomTimeRange) {
+        timeRangeStructured = buildTimeRangeStructured(clarificationCustomTimeRange)
+      }
+
+      wsClient?.query(enhancedQuestion, 100, conversationId, timeRangeStructured)
+
+      // Clear clarification custom time range after submission
+      clarificationCustomTimeRange = null
+    }
 
     setTimeout(scrollToBottom, 100)
   }
@@ -648,7 +927,7 @@
       }))
 
       // Call backend summarization API
-      const response = await fetch('/api/summarize', {
+      const response = await fetch(getApiUrl('summarize'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ messages: oldMessages })
@@ -672,6 +951,70 @@
     }
   }
 
+  // NEW: 구조화된 시간 범위 생성 함수
+  function buildTimeRangeStructured(customRange: TimeRangeValue): TimeRangeStructured {
+    if (customRange.type === 'relative') {
+      return {
+        type: 'relative',
+        relative: {
+          value: customRange.value,
+          unit: customRange.unit
+        },
+        absolute: null
+      }
+    } else {
+      return {
+        type: 'absolute',
+        relative: null,
+        absolute: {
+          start: customRange.start,
+          end: customRange.end
+        }
+      }
+    }
+  }
+
+  // NEW: 시간 범위를 한국어로 변환
+  function formatTimeRangeKorean(customRange: TimeRangeValue): string {
+    if (customRange.type === 'relative') {
+      const unitMap: Record<string, string> = { h: '시간', d: '일', w: '주', m: '월' }
+      return `최근 ${customRange.value}${unitMap[customRange.unit]}`
+    } else {
+      return `${customRange.start}부터 ${customRange.end}까지`
+    }
+  }
+
+  // Helper: AI 추출 시간 범위를 드롭다운에 반영
+  function updateDropdownFromTimeRange(timeRange: any) {
+    if (typeof timeRange === 'string') {
+      // 문자열 preset → 그대로 사용
+      selectedTimeRange = timeRange
+      customTimeRange = null
+    } else if (timeRange?.type === 'relative' && timeRange.relative) {
+      // 구조화된 형식 → preset 매핑 시도
+      const { value, unit } = timeRange.relative
+      const presetKey = `${value}${unit}`
+
+      const presets = ['1h', '2h', '6h', '12h', '24h', '48h', '7d']
+      if (presets.includes(presetKey)) {
+        selectedTimeRange = presetKey
+        customTimeRange = null
+      } else {
+        // preset 없음 → 사용자 지정
+        selectedTimeRange = 'custom'
+        customTimeRange = { type: 'relative', value, unit }
+      }
+    } else if (timeRange?.type === 'absolute' && timeRange.absolute) {
+      // 절대 날짜 → 사용자 지정
+      selectedTimeRange = 'custom'
+      customTimeRange = {
+        type: 'absolute',
+        start: timeRange.absolute.start,
+        end: timeRange.absolute.end
+      }
+    }
+  }
+
   function handleSubmit() {
     if (!question.trim() || isLoading || !wsClient) return
 
@@ -687,9 +1030,20 @@
       userQuestion = `${selectedService}의 ${userQuestion}`
     }
 
-    // Apply time range filter from dropdown
-    if (selectedTimeRange !== 'all') {
-      const timeMap: Record<string, string> = {
+    // NEW: 시간 범위 처리 (구조화된 형식 지원)
+    let timeRangeStructured: TimeRangeStructured | null = null
+
+    if (customTimeRange) {
+      // 사용자 지정 시간 범위 (모달) - 명시적 의도이므로 백엔드에 전달
+      timeRangeStructured = buildTimeRangeStructured(customTimeRange)
+      const timePhrase = formatTimeRangeKorean(customTimeRange)
+      if (!userQuestion.includes('최근') && !userQuestion.includes('시간') && !userQuestion.includes('부터')) {
+        userQuestion = `${timePhrase} ${userQuestion}`
+      }
+    } else if (selectedTimeRange !== 'all' && selectedTimeRange !== 'custom') {
+      // Preset 드롭다운 시간 범위 - 질문 텍스트에만 추가, 백엔드에는 전달 안 함
+      // LLM이 질문에서 시간을 추출하도록 하여 충돌 감지 가능하게 함
+      const timePhraseMap: Record<string, string> = {
         '1h': '최근 1시간',
         '2h': '최근 2시간',
         '6h': '최근 6시간',
@@ -698,12 +1052,13 @@
         '48h': '최근 48시간',
         '7d': '최근 7일'
       }
-      const timePhrase = timeMap[selectedTimeRange] || `최근 ${selectedTimeRange}`
+      const timePhrase = timePhraseMap[selectedTimeRange]
 
       // Only add if not already mentioned
       if (timePhrase && !userQuestion.includes('최근') && !userQuestion.includes('시간')) {
         userQuestion = `${timePhrase} ${userQuestion}`
       }
+      // timeRangeStructured는 null로 유지 (백엔드에 전달 안 함)
     }
 
     // Add user message (show original question)
@@ -718,8 +1073,8 @@
     // Add to history and save ID
     currentQueryId = historyStore.addQuery(originalQuestion)
 
-    // Send enhanced query via WebSocket with conversation ID (Feature #2)
-    wsClient.query(userQuestion, 100, conversationId)
+    // Send enhanced query via WebSocket with conversation ID and time_range_structured (Feature #2)
+    wsClient.query(userQuestion, 100, conversationId, timeRangeStructured)
 
     // Scroll to bottom
     setTimeout(scrollToBottom, 100)
@@ -970,22 +1325,67 @@
                           <span class="text-red-500 ml-1">*</span>
                         {/if}
                       </label>
-                      <select
-                        value={message.userAnswers?.[`q${i}`] || clarificationAnswers[message.clarificationId]?.[`q${i}`] || ''}
-                        on:change={(e) => {
-                          if (!clarificationAnswers[message.clarificationId]) {
-                            clarificationAnswers[message.clarificationId] = {}
-                          }
-                          clarificationAnswers[message.clarificationId][`q${i}`] = e.currentTarget.value
-                        }}
-                        disabled={messages.slice(messageIndex + 1).some(m => m.role === 'user')}
-                        class="w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-purple-500 focus:border-purple-500 disabled:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-75"
-                      >
-                        <option value="">선택하세요</option>
-                        {#each clarification.options as option}
-                          <option value={option}>{option}</option>
-                        {/each}
-                      </select>
+                      {#if clarification.field === 'time' && clarification.allow_custom}
+                        <!-- Time clarification with custom modal support -->
+                        <div class="flex gap-2">
+                          <select
+                            value={message.userAnswers?.[`q${i}`] || clarificationAnswers[message.clarificationId]?.[`q${i}`] || ''}
+                            on:change={(e) => {
+                              const value = e.currentTarget.value
+                              if (value === '사용자 지정...') {
+                                clarificationModalContext = { clarificationId: message.clarificationId, questionIndex: i }
+                                showClarificationModal = true
+                              } else {
+                                if (!clarificationAnswers[message.clarificationId]) {
+                                  clarificationAnswers[message.clarificationId] = {}
+                                }
+                                clarificationAnswers[message.clarificationId][`q${i}`] = value
+                                clarificationCustomTimeRange = null
+                              }
+                            }}
+                            disabled={messages.slice(messageIndex + 1).some(m => m.role === 'user')}
+                            class="flex-1 px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-purple-500 focus:border-purple-500 disabled:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-75"
+                          >
+                            <option value="">선택하세요</option>
+                            {#each clarification.options.filter(opt => opt !== '사용자 지정...') as option}
+                              <option value={option}>{option}</option>
+                            {/each}
+                          </select>
+                          <button
+                            on:click={() => {
+                              clarificationModalContext = { clarificationId: message.clarificationId, questionIndex: i }
+                              showClarificationModal = true
+                            }}
+                            disabled={messages.slice(messageIndex + 1).some(m => m.role === 'user')}
+                            class="px-3 py-1.5 text-sm bg-purple-100 text-purple-700 rounded hover:bg-purple-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            사용자 지정...
+                          </button>
+                        </div>
+                        {#if clarificationCustomTimeRange && clarificationAnswers[message.clarificationId]?.[`q${i}`]?.startsWith('최근') || clarificationAnswers[message.clarificationId]?.[`q${i}`]?.includes('~')}
+                          <span class="text-xs text-purple-600 font-medium mt-1 block">
+                            {clarificationAnswers[message.clarificationId][`q${i}`]}
+                          </span>
+                        {/if}
+                      {:else}
+                        <!-- Regular select for non-time or non-custom clarifications -->
+                        <select
+                          value={message.userAnswers?.[`q${i}`] || clarificationAnswers[message.clarificationId]?.[`q${i}`] || ''}
+                          on:change={(e) => {
+                            if (!clarificationAnswers[message.clarificationId]) {
+                              clarificationAnswers[message.clarificationId] = {}
+                            }
+                            clarificationAnswers[message.clarificationId][`q${i}`] = e.currentTarget.value
+                          }}
+                          disabled={messages.slice(messageIndex + 1).some(m => m.role === 'user')}
+                          class="w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-purple-500 focus:border-purple-500 disabled:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-75"
+                        >
+                          <option value="">선택하세요</option>
+                          {#each clarification.options as option}
+                            <option value={option}>{option}</option>
+                          {/each}
+                        </select>
+                      {/if}
                     </div>
                   {/each}
                 </div>
@@ -1085,6 +1485,7 @@
       <ServiceFilter
         bind:selectedService={selectedService}
         bind:selectedTimeRange={selectedTimeRange}
+        bind:customTimeRange={customTimeRange}
         disabled={isLoading}
       />
 
@@ -1186,6 +1587,13 @@
 
 <!-- Feature #5: Alert Toast Notification -->
 <AlertNotification />
+
+<!-- Clarification Custom Time Range Modal -->
+<TimeRangeModal
+  bind:show={showClarificationModal}
+  onConfirm={handleClarificationModalConfirm}
+  onCancel={handleClarificationModalCancel}
+/>
 
 <style>
   /* Hide scrollbar for quick questions */

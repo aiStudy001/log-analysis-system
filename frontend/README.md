@@ -51,6 +51,140 @@ Modern web dashboard for AI-powered log analysis with Text-to-SQL natural langua
 
 ---
 
+## 🎯 Advanced Features Integration
+
+### Feature #1: Query Result Cache UI
+**Cache Hit Badge**: 🟢 "캐시된 결과 (0.05초)" - Green badge displayed when results retrieved from cache
+**Cache Miss**: Regular execution time display (~6-7초)
+
+**Implementation**: Backend sends `cache_hit` flag in response, frontend displays badge based on this flag.
+
+---
+
+### Feature #2: Context-Aware UI
+**Resolved Question Display**:
+- Shows both original and resolved questions if different
+- Example:
+  - Original: "그 서비스의 에러는?"
+  - Resolved: "payment-api의 에러는?" (shown below original)
+
+**Focus Tracking Badges**:
+- **Service badge**: "payment-api" (blue badge)
+- **Time badge**: "최근 1시간" (gray badge)
+- Displayed next to query results
+
+**Implementation**: `src/lib/stores/chatStore.ts` tracks conversation_id and resolved_question state.
+
+---
+
+### Feature #3: Clarification UI 🆕
+**Component**: ClarificationCard.svelte (NEW component needed)
+
+**Clarification Card Layout**:
+1. **Question Display**: Shows clarification question text
+2. **Option Grid**: 3-column button layout for options
+3. **Required Indicator**: Red asterisk (*) for required fields
+4. **Submit Button**: "답변 제출" to send user response
+
+**Question Types**:
+
+1. **missing_info** (서비스 선택):
+   ```
+   Question: "어떤 서비스의 로그를 분석할까요?"
+   Options: ["payment-api", "order-api", "user-api", "전체"]
+   Layout: Button grid (3 columns)
+   Required: false
+   ```
+
+2. **ambiguous_time** (시간 범위 선택):
+   ```
+   Question: "시간 범위를 명확히 해주세요"
+   Options: ["최근 1시간", "최근 6시간", "최근 24시간", "최근 48시간", "최근 7일", "사용자 지정..."]
+   Layout: Button grid (3 columns)
+   Required: true
+   ```
+
+**User Response Flow**:
+1. User clicks option → Selected state (blue highlight)
+2. User clicks "답변 제출" → Append to question → Resubmit query
+3. If "사용자 지정..." selected → Open TimeRangeModal
+
+---
+
+### Time Range Modal (NEW) 🆕
+**Component**: TimeRangeModal.svelte (NEW component needed)
+
+**Modal Layout**:
+- **Tab 1: 상대 시간 (Relative)**
+  - Value input: Number input field (1-720)
+  - Unit select: Dropdown (시간/일/주/월 → h/d/w/m)
+  - Example: "3" + "시간" → `{type: "relative", relative: {value: 3, unit: "h"}}`
+
+- **Tab 2: 절대 날짜 (Absolute)**
+  - Start date picker: ISO 8601 date (YYYY-MM-DD)
+  - End date picker: ISO 8601 date (YYYY-MM-DD)
+  - Validation: start < end, end <= today, range <= 1 year
+  - Example: "2025-01-01" ~ "2025-01-31" → `{type: "absolute", absolute: {start: "2025-01-01", end: "2025-01-31"}}`
+
+**Submit Flow**:
+1. User fills inputs → Validation check
+2. Click "적용" → Generate time_range_structured object
+3. Send to backend with original question
+4. Backend prioritizes this over LLM extraction
+
+**Integration**: Pass `time_range_structured` in POST /query request body.
+
+---
+
+### Progress Tracking (Multi-Step) 🆕
+**Component**: MultiStepProgress.svelte (UPDATE for 8 steps)
+
+**8 Steps**:
+1. **Context 해석** (resolve_context) - ~500ms
+2. **Filters 추출** (extract_filters) - ~1s
+3. **재질문** (clarifier) - ~1s (조건부, skipped if no clarification)
+4. **Schema 조회** (retrieve_schema) - ~100ms
+5. **SQL 생성** (generate_sql) - ~2s
+6. **SQL 검증** (validate_sql) - ~10ms
+7. **Query 실행** (execute_query) - ~50ms
+8. **Insight 생성** (generate_insight) - ~2s
+
+**Step States**:
+- **pending** (gray): Not started yet
+- **active** (blue pulse): Currently executing
+- **completed** (green checkmark): Finished successfully
+- **skipped** (gray strikethrough): Step skipped (e.g., clarifier when no clarifications needed)
+
+**Implementation**: Listen to WebSocket events:
+- `node_start` → Set step to active
+- `node_end` → Set step to completed
+- `clarification_skipped` → Set step 3 to skipped
+- `clarification_needed` → Pause at step 3, show ClarificationCard
+
+---
+
+### Alert Badge (Future) 🔜
+**Component**: AlertBadge.svelte (TODO)
+
+**UI Elements**:
+- Bell icon (top-right corner)
+- Badge count: Unread alerts number
+- Dropdown panel: Recent 5 alerts
+- Alert types: error_rate_spike | slow_api | service_down
+- Severity colors: critical (red) | warning (yellow)
+
+**WebSocket Integration** (TODO):
+```typescript
+wsClient.onAlert((alert) => {
+  alertStore.add(alert);
+  showToast(alert.message, alert.severity);
+});
+```
+
+**Backend Status**: Alerting service fully implemented, but WebSocket broadcast not integrated yet.
+
+---
+
 ## 🎯 Prerequisites
 
 - **Node.js 18+**: [다운로드](https://nodejs.org/)

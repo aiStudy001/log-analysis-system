@@ -14,6 +14,14 @@ export default defineConfig({
       '$lib': path.resolve(__dirname, './src/lib')
     }
   },
+  optimizeDeps: {
+    include: ['marked']  // Ensure marked is bundled
+  },
+  build: {
+    commonjsOptions: {
+      include: [/marked/, /node_modules/]  // Include marked in CommonJS handling
+    }
+  },
   server: {
     port: 5173,
     proxy: {

@@ -6,11 +6,12 @@
 
 본 프로젝트는 **LangGraph + Claude Sonnet 4.5**를 통해 이 문제를 해결합니다:
 
-- **🤖 LangGraph 5-Node 워크플로우**
-  
-  - Schema 조회 → SQL 생성 → 검증 → 실행 → 인사이트
-  - 자연어 → SQL 자동 변환 (~4-5초)
+- **🤖 LangGraph 8-Node 워크플로우**
+
+  - Context 해석 → Filters 추출 → 재질문 → Schema 조회 → SQL 생성 → 검증 → 실행 → 인사이트
+  - 자연어 → SQL 자동 변환 (~6-7초, 4회 LLM 호출)
   - 자동 재시도 로직 (최대 3회, 85% 성공률)
+  - 조건부 재질문 (동적 서비스 목록, 시간 범위 모달)
 
 - **🚀 PostgreSQL COPY Bulk Insert**
   
@@ -62,9 +63,10 @@
                    ↓
 ┌─────────────────────────────────────────────────────────────┐
 │              ANALYSIS LAYER (Port 8001)                     │
-│  LangGraph 5-Node Workflow + Claude Sonnet 4.5            │
-│  Schema → SQL → Validate → Execute → AI Insight           │
-│  Response Time: ~4-5 seconds                                │
+│  LangGraph 8-Node Workflow + Claude Sonnet 4.5            │
+│  Context → Filters → Clarify → Schema → SQL → Validate    │
+│  → Execute → Insight  (조건부 재질문, 대화 기억, 참조 해석) │
+│  Response Time: ~6-7 seconds  (4회 LLM 호출)              │
 └──────────────────┬──────────────────────────────────────────┘
                    │ WebSocket / REST
                    ↓
@@ -79,14 +81,14 @@
 
 ### 컴포넌트 설명
 
-| Component               | Tech Stack                        | Performance                           | Purpose              | Documentation                                    |
-| ----------------------- | --------------------------------- | ------------------------------------- | -------------------- | ------------------------------------------------ |
-| **Log Save Server**     | FastAPI, asyncpg, PostgreSQL COPY | 19,231 logs/sec, <5ms batch write     | 고성능 배치 로그 저장         | [README](services/log-save-server/README.md)     |
-| **Log Analysis Server** | LangGraph, Claude 4.5, WebSocket  | ~4-5s query, 85% success rate         | AI 기반 Text-to-SQL 분석 | [README](services/log-analysis-server/README.md) |
-| **PostgreSQL 15**       | JSONB, ENUMs, B-tree Indexes      | 21 fields, 4 indexes                  | 로그 저장소 (Soft delete) | [schema.sql](database/schema.sql)                |
-| **Frontend Dashboard**  | Svelte 5, TypeScript, Tailwind 4  | <100ms FCP, real-time streaming       | 웹 대시보드 UI            | [README](frontend/README.md)                     |
-| **Python Client**       | asyncio, httpx, gzip              | <0.1ms blocking, 70% bandwidth saving | 비동기 로그 수집            | [README](clients/python/README.md)               |
-| **JavaScript Client**   | node-fetch, pako, gzip            | <0.1ms blocking, 70% bandwidth saving | 비동기 로그 수집            | [README](clients/javascript/README.md)           |
+| Component               | Tech Stack                        | Performance                           | Purpose              | Docker Image                      | Documentation                                    |
+| ----------------------- | --------------------------------- | ------------------------------------- | -------------------- | --------------------------------- | ------------------------------------------------ |
+| **Log Save Server**     | FastAPI, asyncpg, PostgreSQL COPY | 19,231 logs/sec, <5ms batch write     | 고성능 배치 로그 저장         | `ljh0/log-save-server:latest`     | [README](services/log-save-server/README.md)     |
+| **Log Analysis Server** | LangGraph, Claude 4.5, WebSocket  | ~4-5s query, 85% success rate         | AI 기반 Text-to-SQL 분석 | `ljh0/log-analysis-server:latest` | [README](services/log-analysis-server/README.md) |
+| **PostgreSQL 15**       | JSONB, ENUMs, B-tree Indexes      | 21 fields, 4 indexes                  | 로그 저장소 (Soft delete) | `postgres:15`                     | [schema.sql](database/schema.sql)                |
+| **Frontend Dashboard**  | Svelte 5, TypeScript, Tailwind 4  | <100ms FCP, real-time streaming       | 웹 대시보드 UI            | `ljh0/log-analysis-frontend:latest` | [README](frontend/README.md)                     |
+| **Python Client**       | asyncio, httpx, gzip              | <0.1ms blocking, 70% bandwidth saving | 비동기 로그 수집            | -                                 | [README](clients/python/README.md)               |
+| **JavaScript Client**   | node-fetch, pako, gzip            | <0.1ms blocking, 70% bandwidth saving | 비동기 로그 수집            | -                                 | [README](clients/javascript/README.md)           |
 
 ### 데이터 흐름
 
@@ -155,12 +157,74 @@ def create_sql_agent():
 - ✅ SQL 작성 시간 **90% 단축** (10분 → 1분)
 - ✅ 개발자 생산성 **3배 향상** (SQL 학습 불필요)
 - ✅ 자동 재시도로 **85% 성공률** 달성
-- ✅ 총 응답 시간 **~4-5초** (실시간 수준)
+- ✅ 총 응답 시간 **~6-7초** (4회 LLM 호출 포함)
 
 **비즈니스 임팩트**:
 
 - 개발자 1인당 **월 40시간 절약** (SQL 쿼리 작성)
 - 10명 팀 기준 연간 **$120K 비용 절감**
+
+---
+
+## 🎯 핵심 기능
+
+### 1. Query Result Cache (쿼리 결과 캐싱)
+**구현**: `services/log-analysis-server/app/services/cache_service.py`
+
+- **TTL 기반 캐싱**: 5분 TTL, 자동 만료
+- **LRU 제거**: access_count 기반 최소 사용 항목 제거
+- **자동 무효화**: 새 로그 삽입 시 전체 캐시 초기화
+- **성능 개선**: 동일 쿼리 재실행 시 <10ms 응답
+- **Singleton 패턴**: asyncio.Lock으로 스레드 안전성 보장
+
+### 2. Context-Aware Agent (맥락 인식 에이전트)
+**구현**: `app/agent/context_resolver.py`, `app/services/conversation_service.py`
+
+- **참조 해석**: "그 에러", "그 서비스" → 구체적 엔티티 (ALWAYS LLM 호출, ~500ms)
+- **Focus 추적**: service, error_type, time_range 자동 추출
+- **대화 기억**: 최근 10턴 유지, 3턴 컨텍스트 제공
+- **LLM 분석**: 모든 질문에 대해 맥락 분석 실행
+
+**예시**:
+```
+Turn 1: "payment-api 에러 로그" → Focus: {service: "payment-api"}
+Turn 2: "그 서비스의 최근 1시간 로그는?"
+  → Resolved: "payment-api의 최근 1시간 로그는?"
+  → Context resolution applied
+```
+
+### 3. Intelligent Clarification (지능형 재질문)
+**구현**: `app/agent/clarifier.py`
+
+- **LLM 기반 쿼리 분석**: 서비스/시간 필터 자동 추출 (~1s)
+- **재질문 로직**: 모호한 정보 감지 시 선택지 제공 (최대 2회)
+- **집계 vs 필터 구분**: GROUP BY vs WHERE 자동 판단
+- **동적 서비스 목록**: DB에서 DISTINCT service 조회
+- **시간 범위 모달**: "사용자 지정..." 옵션으로 정확한 시간 입력
+
+**재질문 예시**:
+```
+Q: "에러 로그 보여줘"
+→ 재질문: "어느 서비스의 로그를 조회할까요?"
+  선택지: [payment-api, order-api, user-api, ..., 전체]
+
+Q: "조금 전 로그"
+→ 재질문: "시간 범위를 선택해주세요"
+  선택지: [최근 1시간, 최근 3시간, ..., 사용자 지정...]
+```
+
+### 4. Alerting & Monitoring (알림 및 모니터링)
+**구현**: `app/services/alerting_service.py`, `app/controllers/alerts.py`
+
+- **자동 이상 탐지**: 3가지 체크 (에러율 급증, 느린 API, 서비스 다운)
+- **에러율 급증**: 현재 5분 vs 30-35분 전 baseline 비교 (>10% 증가)
+- **느린 API**: Duration > 2초, 최근 10분 3회 이상
+- **서비스 다운**: 5분간 로그 없음
+- **Alert 히스토리**: 최근 100개 보관
+
+**엔드포인트**:
+- `POST /api/alerts/check` - 이상 탐지 실행
+- `GET /api/alerts/history` - 최근 알림 조회
 
 ---
 
@@ -336,12 +400,19 @@ curl http://localhost:8001/      # Log Analysis Server (200 OK)
 curl http://localhost:5173/      # Frontend (HTML)
 ```
 
-**접속 URL**:
+**접속 URL (로컬 개발)**:
 
 - 🌐 **Frontend Dashboard**: http://localhost:5173
 - 📡 **Log Save API**: http://localhost:8000
 - 🤖 **Log Analysis API**: http://localhost:8001
 - 🗄️ **PostgreSQL**: localhost:5433 (user: postgres)
+
+**접속 URL (프로덕션 배포)**:
+
+- 🌐 **Frontend Dashboard**: http://13.62.76.208
+- 📡 **Log Save API**: http://13.60.221.13:8000
+- 🤖 **Log Analysis API**: http://13.62.76.208:8001
+- 🗄️ **PostgreSQL**: 13.60.221.13:5433 (internal)
 
 ### 첫 쿼리 테스트
 
@@ -503,9 +574,6 @@ log-analysis-system/
 - [AWS 배포 가이드](docs/aws-deployment-guide.md) - 프로덕션 환경 구축
 - [Fluentd 통합](docs/fluentd-guide.md) - 대규모 로그 수집
 
-### 실무 시나리오
-
-- [38개 시나리오](docs/scenarios-detailed.md) - 실전 사용 예시 및 쿼리
 
 ---
 
@@ -582,15 +650,68 @@ docker-compose -f docker-compose.prod.yml up -d
 
 ### AWS 분산 배포 아키텍처
 
-**Server A** (EC2 t3.medium):
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    USER BROWSER                             │
+│                 http://13.62.76.208                         │
+└────────────────────┬────────────────────────────────────────┘
+                     │ HTTP/WebSocket
+                     ↓
+┌─────────────────────────────────────────────────────────────┐
+│  SERVER B (13.62.76.208) - EC2 t3.medium                   │
+├─────────────────────────────────────────────────────────────┤
+│  Frontend (Nginx) - Port 80                                │
+│  • Serve static files (Svelte app)                        │
+│  • Proxy /api → log-analysis-server:8000                   │
+│  • Proxy /ws → log-analysis-server:8000                    │
+├─────────────────────────────────────────────────────────────┤
+│  Log Analysis Server - Port 8001                           │
+│  • LangGraph Multi-Agent AI                               │
+│  • Claude Sonnet 4.5 Text-to-SQL                          │
+│  • WebSocket real-time streaming                          │
+│  • Query result caching                                    │
+└────────────────────┬────────────────────────────────────────┘
+                     │ PostgreSQL queries
+                     ↓
+┌─────────────────────────────────────────────────────────────┐
+│  SERVER A (13.60.221.13) - EC2 t3.medium                   │
+├─────────────────────────────────────────────────────────────┤
+│  Log Save Server - Port 8000                               │
+│  • High-performance log ingestion                          │
+│  • PostgreSQL COPY bulk insert (19K logs/sec)             │
+│  • Async batch processing                                  │
+├─────────────────────────────────────────────────────────────┤
+│  PostgreSQL 15 - Port 5433                                 │
+│  • 21 fields (JSONB metadata)                             │
+│  • 4 optimized indexes                                     │
+│  • Soft delete support                                     │
+└─────────────────────────────────────────────────────────────┘
+       ↑
+       │ Log ingestion from clients
+       │
+┌──────┴────────┐
+│  Application  │ (Python/JavaScript clients)
+│  Services     │ (FastAPI, Express, etc.)
+└───────────────┘
+```
 
-- Log Save Server + PostgreSQL
+**Server A** (EC2 t3.medium - 13.60.221.13):
+
+- Log Save Server (Port 8000) + PostgreSQL (Port 5433)
 - 역할: 로그 수집 및 저장
+- Docker 이미지: `ljh0/log-save-server:latest`
+- 접속: http://13.60.221.13:8000
 
-**Server B** (EC2 t3.medium):
+**Server B** (EC2 t3.medium - 13.62.76.208):
 
-- Log Analysis Server + Frontend
+- Log Analysis Server (Port 8001) + Frontend (Port 80)
 - 역할: AI 분석 및 UI 제공
+- Docker 이미지:
+  - `ljh0/log-analysis-server:latest`
+  - `ljh0/log-analysis-frontend:latest`
+- 접속:
+  - Frontend: http://13.62.76.208
+  - API: http://13.62.76.208:8001
 
 **추가 구성**:
 
@@ -607,61 +728,34 @@ docker-compose -f docker-compose.prod.yml up -d
 
 상세: [AWS 배포 가이드](docs/aws-deployment-guide.md)
 
+### 프로덕션 배포 테스트
+
+```bash
+# Frontend 접속 테스트
+curl http://13.62.76.208/
+
+# Log Save Server 헬스체크
+curl http://13.60.221.13:8000/
+
+# Log Analysis Server 헬스체크
+curl http://13.62.76.208:8001/
+
+# 서비스 목록 조회 (API 테스트)
+curl http://13.62.76.208/api/services
+
+# Text-to-SQL 쿼리 테스트
+curl -X POST http://13.62.76.208/api/query \
+  -H "Content-Type: application/json" \
+  -d '{"question": "최근 1시간 에러 로그는?"}'
+```
+
+**Playwright 자동화 테스트 결과**:
+- ✅ 페이지 로딩: 정상
+- ✅ 콘솔 에러: 0개 (CORS 해결됨)
+- ✅ API 통신: `/api/services` 정상 작동 (8개 서비스 로드)
+- ✅ WebSocket: 실시간 스트리밍 정상
+- ✅ 쿼리 응답: 3초 이내 응답
+
 ---
 
-## ❓ FAQ & Troubleshooting
 
-### 주요 FAQ
-
-**Q: Claude API Key 없이 사용 가능?**
-
-A: Text-to-SQL은 Claude 필수. 대안으로 OpenAI GPT-4 설정 가능:
-
-```bash
-# .env 파일
-LLM_PROVIDER=openai
-OPENAI_API_KEY=your_openai_key
-```
-
-**Q: 프로덕션에서 처리 가능한 로그량?**
-
-A: 벤치마크 **19,231 logs/sec** → 1일 약 **16억 로그** 처리 가능
-
-**Q: 비용은 얼마?**
-
-A: ~$250/월 (AWS EC2 + RDS + Claude API 1000쿼리/일)
-
-**Q: 다른 언어 지원?**
-
-A: Python/JavaScript 공식 지원. 다른 언어는 HTTP API 직접 호출 또는 [Fluentd 사용](docs/fluentd-guide.md)
-
-### Troubleshooting
-
-**증상: PostgreSQL 연결 실패**
-
-```bash
-# 해결
-echo $POSTGRES_PASSWORD
-docker-compose logs postgres
-# .env 파일 확인 후 재시작
-docker-compose down && docker-compose up -d
-```
-
-**증상: Claude API 오류**
-
-```bash
-# 해결
-echo $ANTHROPIC_API_KEY
-# https://console.anthropic.com에서 새 키 발급
-# .env 파일 업데이트 후 재시작
-```
-
-**증상: WebSocket 연결 실패**
-
-```bash
-# 해결
-curl http://localhost:8001/
-# CORS 설정 확인 (allow_origins=["http://localhost:5173"])
-```
-
----

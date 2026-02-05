@@ -178,9 +178,11 @@ async def clarification_node(state: AgentState, query_repo=None) -> dict:
                         "최근 6시간",
                         "최근 24시간",
                         "최근 48시간",
-                        "최근 7일"
+                        "최근 7일",
+                        "사용자 지정..."  # NEW: 모달 트리거
                     ],
-                    "required": True
+                    "required": True,
+                    "allow_custom": True  # NEW: 프론트엔드에 모달 지원 알림
                 })
             elif time_clarity == "none" and analysis.get("is_aggregation"):
                 # 집계 쿼리인데 시간 없으면 선택사항으로 물어봄
@@ -194,9 +196,11 @@ async def clarification_node(state: AgentState, query_repo=None) -> dict:
                         "최근 24시간",
                         "최근 48시간",
                         "최근 7일",
+                        "사용자 지정...",  # NEW: 모달 트리거
                         "전체"
                     ],
-                    "required": False
+                    "required": False,
+                    "allow_custom": True  # NEW: 프론트엔드에 모달 지원 알림
                 })
 
         # 재질문이 있으면 이벤트 발생

@@ -93,7 +93,10 @@
       "Bash(find:*)",
       "Bash(docker build:*)",
       "Bash(docker login:*)",
-      "Bash(docker push:*)"
+      "Bash(docker push:*)",
+      "Bash(set:*)",
+      "Bash(pnpm run build:*)",
+      "Bash(grep:*)"
     ]
   }
 }

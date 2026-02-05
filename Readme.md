@@ -4,8 +4,6 @@
 
 ## AI Text-to-SQL + 고성능 분산 아키텍처
 
-본 프로젝트는 **LangGraph + Claude Sonnet 4.5**를 통해 이 문제를 해결합니다:
-
 - **🤖 LangGraph 8-Node 워크플로우**
 
   - Context 해석 → Filters 추출 → 재질문 → Schema 조회 → SQL 생성 → 검증 → 실행 → 인사이트

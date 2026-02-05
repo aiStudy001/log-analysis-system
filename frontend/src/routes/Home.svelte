@@ -53,6 +53,11 @@
 
     // If it's a TimeRangeStructured object
     if (typeof timeRange === 'object') {
+      // Handle null/undefined type (means "all" or no filter)
+      if (!timeRange.type || timeRange.type === null) {
+        return '전체'
+      }
+
       if (timeRange.type === 'relative' && timeRange.relative) {
         const unitMap: Record<string, string> = { h: '시간', d: '일', w: '주', m: '월' }
         return `최근 ${timeRange.relative.value}${unitMap[timeRange.relative.unit]}`
@@ -61,7 +66,7 @@
       }
     }
 
-    return String(timeRange)
+    return '전체'  // Fallback to "전체" instead of [object Object]
   }
 
   // Helper: Compare LLM extracted time with dropdown time

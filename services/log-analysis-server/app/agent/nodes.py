@@ -6,7 +6,10 @@ LangGraph 노드 구현 (Refactored with Repository Pattern + Event Accumulation
 - Event Accumulation 패턴 (meal-planner)
 """
 
+import logging
 from langchain_core.messages import HumanMessage
+
+logger = logging.getLogger(__name__)
 
 from .state import AgentState
 from .prompts import SQL_GENERATION_PROMPT, INSIGHT_GENERATION_PROMPT
@@ -16,7 +19,7 @@ from .tools import (
     validate_sql_syntax,
     format_query_results
 )
-from .llm_factory import get_llm
+from .llm_factory import get_llm, llm_invoke_with_retry, LLMError
 from .context_resolver import extract_focus_entities
 
 
@@ -28,24 +31,38 @@ async def retrieve_schema_node(state: AgentState, schema_repo) -> dict:
         state: Agent state
         schema_repo: SchemaRepository instance (injected)
     """
-    # Repository를 통한 스키마 조회
-    schema_info = await schema_repo.get_table_schema()
-    sample_data = await schema_repo.get_sample_data()
+    try:
+        # Repository를 통한 스키마 조회
+        schema_info = await schema_repo.get_table_schema()
+        sample_data = await schema_repo.get_sample_data()
 
-    return {
-        "schema_info": schema_info,
-        "sample_data": sample_data,
-        "messages": [{"role": "system", "content": "Schema retrieved"}],
-        "events": [{
-            "type": "node_complete",
-            "node": "retrieve_schema",
-            "status": "completed",
-            "data": {
-                "schema_retrieved": True,
-                "sample_count": 10
-            }
-        }]
-    }
+        return {
+            "schema_info": schema_info,
+            "sample_data": sample_data,
+            "messages": [{"role": "system", "content": "Schema retrieved"}],
+            "events": [{
+                "type": "node_complete",
+                "node": "retrieve_schema",
+                "status": "completed",
+                "data": {
+                    "schema_retrieved": True,
+                    "sample_count": 10
+                }
+            }]
+        }
+    except Exception as e:
+        logger.error(f"Schema retrieval failed: {e}", exc_info=True)
+        return {
+            "error_message": f"스키마 조회 실패: {str(e)}",
+            "events": [{
+                "type": "node_complete",
+                "node": "retrieve_schema",
+                "status": "failed",
+                "data": {
+                    "error": str(e)
+                }
+            }]
+        }
 
 
 async def generate_sql_node(state: AgentState) -> dict:
@@ -62,27 +79,45 @@ async def generate_sql_node(state: AgentState) -> dict:
         max_results=state["max_results"]
     )
 
-    # LLM 호출 (streaming 지원)
+    # LLM 호출 with timeout and retry
     llm = get_llm(streaming=True)
-    response = await llm.ainvoke([HumanMessage(content=prompt)])
-    generated_sql = extract_sql_from_response(response.content)
 
-    return {
-        "generated_sql": generated_sql,
-        "messages": [{"role": "assistant", "content": f"Generated SQL:\n{generated_sql}"}],
-        "events": [{
-            "type": "node_complete",
-            "node": "generate_sql",
-            "status": "completed",
-            "data": {
-                "sql_generated": True,
-                "sql_length": len(generated_sql),
-                # NEW: LLM prompt and response for task history
-                "llm_prompt": prompt,
-                "llm_response": generated_sql
-            }
-        }]
-    }
+    try:
+        response = await llm_invoke_with_retry(llm, [HumanMessage(content=prompt)])
+        generated_sql = extract_sql_from_response(response.content)
+
+        return {
+            "generated_sql": generated_sql,
+            "messages": [{"role": "assistant", "content": f"Generated SQL:\n{generated_sql}"}],
+            "events": [{
+                "type": "node_complete",
+                "node": "generate_sql",
+                "status": "completed",
+                "data": {
+                    "sql_generated": True,
+                    "sql_length": len(generated_sql),
+                    # NEW: LLM prompt and response for task history
+                    "llm_prompt": prompt,
+                    "llm_response": generated_sql
+                }
+            }]
+        }
+    except LLMError as e:
+        # LLM failed after retries - return error state
+        return {
+            "error_message": str(e),
+            "validation_error": "LLM_TIMEOUT",
+            "retry_count": state.get("retry_count", 0) + 1,
+            "events": [{
+                "type": "node_complete",
+                "node": "generate_sql",
+                "status": "failed",
+                "data": {
+                    "error": str(e),
+                    "error_type": "LLM_TIMEOUT"
+                }
+            }]
+        }
 
 
 async def validate_sql_node(state: AgentState) -> dict:
@@ -226,27 +261,44 @@ async def generate_single_step_insight(state: AgentState) -> dict:
         execution_time_ms=state["execution_time_ms"]
     )
 
-    # LLM 호출 (streaming 지원)
+    # LLM 호출 with timeout and retry
     llm = get_llm(streaming=True)
-    response = await llm.ainvoke([HumanMessage(content=prompt)])
-    insight = response.content
 
-    return {
-        "insight": insight,
-        "messages": [{"role": "assistant", "content": f"Insight: {insight}"}],
-        "events": [{
-            "type": "node_complete",
-            "node": "generate_insight",
-            "status": "completed",
-            "data": {
-                "insight_generated": True,
-                "multi_step": False,
-                # NEW: LLM prompt and response for task history
-                "llm_prompt": prompt,
-                "llm_response": insight
-            }
-        }]
-    }
+    try:
+        response = await llm_invoke_with_retry(llm, [HumanMessage(content=prompt)])
+        insight = response.content
+
+        return {
+            "insight": insight,
+            "messages": [{"role": "assistant", "content": f"Insight: {insight}"}],
+            "events": [{
+                "type": "node_complete",
+                "node": "generate_insight",
+                "status": "completed",
+                "data": {
+                    "insight_generated": True,
+                    "multi_step": False,
+                    # NEW: LLM prompt and response for task history
+                    "llm_prompt": prompt,
+                    "llm_response": insight
+                }
+            }]
+        }
+    except LLMError as e:
+        # LLM failed - return error with empty insight
+        return {
+            "insight": f"Error generating insight: {str(e)}",
+            "error_message": str(e),
+            "events": [{
+                "type": "node_complete",
+                "node": "generate_insight",
+                "status": "failed",
+                "data": {
+                    "error": str(e),
+                    "error_type": "LLM_TIMEOUT"
+                }
+            }]
+        }
 
 
 async def generate_multi_step_insight(state: AgentState) -> dict:
@@ -286,26 +338,44 @@ Use Korean. Be specific with numbers and data from the steps.
 Analysis:"""
 
     llm = get_llm(streaming=True)
-    response = await llm.ainvoke([HumanMessage(content=prompt)])
-    insight = response.content
 
-    return {
-        "insight": insight,
-        "messages": [{"role": "assistant", "content": f"Multi-step Insight: {insight}"}],
-        "events": [{
-            "type": "node_complete",
-            "node": "generate_insight",
-            "status": "completed",
-            "data": {
-                "insight_generated": True,
-                "multi_step": True,
-                "total_steps": len(step_results),
-                # NEW: LLM prompt and response for task history
-                "llm_prompt": prompt,
-                "llm_response": insight
-            }
-        }]
-    }
+    try:
+        response = await llm_invoke_with_retry(llm, [HumanMessage(content=prompt)])
+        insight = response.content
+
+        return {
+            "insight": insight,
+            "messages": [{"role": "assistant", "content": f"Multi-step Insight: {insight}"}],
+            "events": [{
+                "type": "node_complete",
+                "node": "generate_insight",
+                "status": "completed",
+                "data": {
+                    "insight_generated": True,
+                    "multi_step": True,
+                    "total_steps": len(step_results),
+                    # NEW: LLM prompt and response for task history
+                    "llm_prompt": prompt,
+                    "llm_response": insight
+                }
+            }]
+        }
+    except LLMError as e:
+        # LLM failed - return error with fallback insight
+        return {
+            "insight": f"Error generating multi-step insight: {str(e)}",
+            "error_message": str(e),
+            "events": [{
+                "type": "node_complete",
+                "node": "generate_insight",
+                "status": "failed",
+                "data": {
+                    "error": str(e),
+                    "error_type": "LLM_TIMEOUT",
+                    "multi_step": True
+                }
+            }]
+        }
 
 
 def should_retry(state: AgentState) -> str:

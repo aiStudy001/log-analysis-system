@@ -7,6 +7,9 @@ from datetime import datetime
 from typing import Optional, Dict
 import hashlib
 import asyncio
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class CacheEntry:
@@ -63,20 +66,24 @@ class QueryCache:
         Returns:
             Cached result dict or None if expired/not found
         """
-        async with self._lock:
-            if key in self._cache:
-                entry = self._cache[key]
+        try:
+            async with self._lock:
+                if key in self._cache:
+                    entry = self._cache[key]
 
-                # Check expiration
-                if entry.is_expired(self._ttl):
-                    del self._cache[key]
-                    return None
+                    # Check expiration
+                    if entry.is_expired(self._ttl):
+                        del self._cache[key]
+                        return None
 
-                # Update access count for LRU
-                entry.access_count += 1
-                return entry.result
+                    # Update access count for LRU
+                    entry.access_count += 1
+                    return entry.result
 
-        return None
+            return None
+        except Exception as e:
+            logger.warning(f"Cache get failed for key '{key}': {e}")
+            return None
 
     async def set(self, key: str, result: dict):
         """
@@ -86,12 +93,16 @@ class QueryCache:
             key: Cache key
             result: Result dictionary to cache
         """
-        async with self._lock:
-            # Evict least recently used if cache is full
-            if len(self._cache) >= self._max_size:
-                self._evict_lru()
+        try:
+            async with self._lock:
+                # Evict least recently used if cache is full
+                if len(self._cache) >= self._max_size:
+                    self._evict_lru()
+                    logger.debug(f"Cache evicted LRU entry")
 
-            self._cache[key] = CacheEntry(result, datetime.now().timestamp())
+                self._cache[key] = CacheEntry(result, datetime.now().timestamp())
+        except Exception as e:
+            logger.warning(f"Cache set failed for key '{key}': {e}")
 
     async def invalidate_all(self):
         """Invalidate entire cache (called when new logs are inserted)"""

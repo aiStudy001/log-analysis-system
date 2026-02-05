@@ -2,16 +2,39 @@
 WebSocket controller for streaming Text-to-SQL queries
 """
 import asyncio
+import logging
+import re
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from app.services.stream_service import stream_query_execution
 from app.dependencies import get_schema_repository, get_query_repository
 from app.services.cache_service import get_query_cache
 from typing import List
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(tags=["websocket"])
 
 # Feature #5: Active WebSocket connections for broadcasting
 active_connections: List[WebSocket] = []
+
+
+def sanitize_error_message(error: str) -> str:
+    """
+    Remove sensitive information from error messages
+
+    Args:
+        error: Raw error message
+
+    Returns:
+        Sanitized error message safe for client display
+    """
+    # Remove file paths
+    error = re.sub(r'File ".*?"', 'File "[REDACTED]"', error)
+    # Remove connection strings
+    error = re.sub(r'postgresql://.*?@', 'postgresql://[REDACTED]@', error)
+    # Remove full stack traces (keep only first line)
+    lines = error.split('\n')
+    return lines[0] if lines else error
 
 
 @router.websocket("/ws/query")
@@ -81,21 +104,28 @@ async def websocket_query(websocket: WebSocket):
                         })
 
     except WebSocketDisconnect:
+        logger.info(f"WebSocket disconnected gracefully for client {websocket.client}")
         if task and not task.done():
             task.cancel()
     except Exception as e:
+        logger.error(f"WebSocket error: {e}", exc_info=True)
+
+        # Try to send error to client
         try:
-            await websocket.send_json({
-                "type": "error",
-                "message": str(e)
-            })
-        except:
-            pass
+            if websocket.client_state.value == 1:  # CONNECTED
+                await websocket.send_json({
+                    "type": "error",
+                    "message": sanitize_error_message(str(e)),
+                    "retry_possible": True
+                })
+        except Exception as send_error:
+            logger.error(f"Failed to send error to client: {send_error}")
         finally:
+            # Try to close WebSocket gracefully
             try:
-                await websocket.close()
-            except:
-                pass
+                await websocket.close(code=1011, reason="Server error")
+            except Exception as close_error:
+                logger.error(f"Failed to close WebSocket: {close_error}")
     finally:
         # Feature #5: Unregister connection
         if websocket in active_connections:
@@ -137,6 +167,7 @@ async def stream_query(
         print(f"✅ stream_query COMPLETED")  # DEBUG
 
     except asyncio.CancelledError:
+        logger.info("Query cancelled by user")
         # Check WebSocket state before sending
         try:
             if websocket.client_state.value == 1:  # CONNECTED
@@ -144,18 +175,20 @@ async def stream_query(
                     "type": "cancelled",
                     "message": "Query cancelled"
                 })
-        except:
-            pass  # WebSocket already disconnected
+        except Exception as e:
+            logger.warning(f"Failed to send cancellation message: {e}")
     except Exception as e:
+        logger.error(f"Error in stream_query: {e}", exc_info=True)
         # Check WebSocket state before sending
         try:
             if websocket.client_state.value == 1:  # CONNECTED
                 await websocket.send_json({
                     "type": "error",
-                    "message": str(e)
+                    "message": sanitize_error_message(str(e)),
+                    "retry_possible": True
                 })
-        except:
-            pass  # WebSocket already disconnected
+        except Exception as send_error:
+            logger.error(f"Failed to send error message: {send_error}")
 
 
 @router.post("/invalidate_cache")
@@ -185,6 +218,8 @@ async def broadcast_alert(alert: dict):
         alert: Alert data to broadcast
     """
     dead_connections = []
+    success_count = 0
+    failed_count = 0
 
     for ws in active_connections:
         try:
@@ -192,10 +227,19 @@ async def broadcast_alert(alert: dict):
                 "type": "alert",
                 **alert
             })
-        except:
+            success_count += 1
+        except Exception as e:
+            logger.warning(f"Failed to send alert to client: {e}")
             dead_connections.append(ws)
+            failed_count += 1
 
     # Remove dead connections
     for ws in dead_connections:
         if ws in active_connections:
             active_connections.remove(ws)
+
+    # Log broadcast summary
+    logger.info(
+        f"Alert broadcast complete: {success_count} success, {failed_count} failed, "
+        f"{len(active_connections)} active connections"
+    )

@@ -20,6 +20,9 @@
     gfm: true,     // GitHub Flavored Markdown
   })
 
+  // Track if Markdown error alert was already shown
+  let markdownErrorShown = false
+
   // Convert markdown to HTML using marked library
   function renderMarkdown(markdown: string): string {
     if (!markdown) return ''
@@ -27,6 +30,18 @@
       return marked.parse(markdown) as string
     } catch (error) {
       console.error('Markdown parsing error:', error)
+
+      // Show alert only once to avoid spam
+      if (!markdownErrorShown) {
+        markdownErrorShown = true
+        alertStore.addAlert({
+          type: 'alert',
+          severity: 'info',
+          message: '일부 텍스트 서식을 표시할 수 없습니다.',
+          data: {}
+        })
+      }
+
       return markdown  // Fallback to plain text
     }
   }
@@ -163,6 +178,10 @@
   let clarificationModalContext: { clarificationId: string; questionIndex: number } | null = null
   let clarificationCustomTimeRange: TimeRangeValue | null = null
 
+  // Query timeout handling
+  let queryTimeout: NodeJS.Timeout | null = null
+  const QUERY_TIMEOUT_MS = 30000  // 30 seconds
+
   // Filter conflict data
   let conflictData: {
     service?: { user: string; ai: string }
@@ -205,6 +224,11 @@
   onDestroy(() => {
     // Clean up WebSocket connection
     wsClient?.disconnect()
+    // Clean up query timeout
+    if (queryTimeout) {
+      clearTimeout(queryTimeout)
+      queryTimeout = null
+    }
   })
 
   // NEW: Generate completed task title based on event data
@@ -252,6 +276,12 @@
   }
 
   function handleStreamEvent(event: StreamEvent) {
+    // Clear query timeout when we receive any event (response arrived)
+    if (queryTimeout) {
+      clearTimeout(queryTimeout)
+      queryTimeout = null
+    }
+
     switch (event.type) {
       case 'cache_hit':
         // Feature #1: Show cache indicator
@@ -588,6 +618,45 @@
         }, 0)
         break
 
+      case 'validation_failed':
+        // SQL 검증 실패 (위험한 SQL, 구문 오류 등)
+        const validationError = event.data?.error || 'SQL validation failed'
+        const retryCount = event.data?.retry_count || 1
+
+        // 백엔드에서 오는 원본 메시지로 중복 체크
+        const lastMessage = $chatStore.messages[$chatStore.messages.length - 1]
+        const isDuplicateError = lastMessage?.role === 'error' && lastMessage.content.includes(validationError)
+
+        if (isDuplicateError) {
+          // 중복: 재시도 횟수만 업데이트
+          chatStore.updateLastErrorMessage(`SQL 검증 실패 (재시도 ${retryCount}/3): ${validationError}`)
+        } else {
+          // 첫 번째 에러: 새 메시지 추가
+          chatStore.addErrorMessage(`SQL 검증 실패 (재시도 ${retryCount}/3): ${validationError}`)
+        }
+
+        chatStore.setLoading(false)
+        chatStore.clearStreaming()
+        isGeneratingSQL = false
+        isGeneratingInsight = false
+        sqlCompleted = false
+        insightCompleted = false
+        setTimeout(scrollToBottom, 100)
+        break
+
+      case 'execution_failed':
+        // SQL 실행 실패 (데이터베이스 오류 등)
+        const executionError = event.data?.error || 'SQL execution failed'
+        chatStore.addErrorMessage(`쿼리 실행 실패: ${executionError}`)
+        chatStore.setLoading(false)
+        chatStore.clearStreaming()
+        isGeneratingSQL = false
+        isGeneratingInsight = false
+        sqlCompleted = false
+        insightCompleted = false
+        setTimeout(scrollToBottom, 100)
+        break
+
       case 'error':
         chatStore.addErrorMessage(event.message)
         chatStore.setLoading(false)
@@ -611,6 +680,25 @@
         alertStore.addAlert({
           type: event.type,
           severity: event.severity,
+          message: event.message,
+          data: event.data
+        })
+        break
+
+      case 'clarification_failed':
+        // Clarification generation failed
+        chatStore.addErrorMessage(
+          `재질문 생성 실패: ${event.data?.message || event.data?.error || '알 수 없는 오류'}`
+        )
+        chatStore.setLoading(false)
+        setTimeout(scrollToBottom, 100)
+        break
+
+      case 'anomaly_check_error':
+        // Background anomaly detection error - show as alert notification
+        alertStore.addAlert({
+          type: 'alert',
+          severity: event.severity || 'warning',
           message: event.message,
           data: event.data
         })
@@ -1002,6 +1090,12 @@
   function handleSubmit() {
     if (!question.trim() || isLoading || !wsClient) return
 
+    // Check WebSocket connection status
+    if (!wsClient.isConnected || !wsClient.isConnected()) {
+      chatStore.addErrorMessage('WebSocket이 연결되지 않았습니다. 페이지를 새로고침해주세요.')
+      return
+    }
+
     // NEW: Clear previous task history
     chatStore.clearTaskHistory()
 
@@ -1057,8 +1151,29 @@
     // Add to history and save ID
     currentQueryId = historyStore.addQuery(originalQuestion)
 
-    // Send enhanced query via WebSocket with conversation ID and time_range_structured (Feature #2)
-    wsClient.query(userQuestion, 100, conversationId, timeRangeStructured)
+    // Send enhanced query via WebSocket with error handling
+    try {
+      wsClient.query(userQuestion, 100, conversationId, timeRangeStructured)
+
+      // Start timeout timer
+      if (queryTimeout) clearTimeout(queryTimeout)
+      queryTimeout = setTimeout(() => {
+        if (isLoading) {
+          chatStore.addErrorMessage(
+            '⏱️ 응답 시간 초과: 서버 응답이 없습니다. 네트워크 연결을 확인하거나 페이지를 새로고침해주세요.'
+          )
+          chatStore.setLoading(false)
+          chatStore.clearStreaming()
+        }
+      }, QUERY_TIMEOUT_MS)
+    } catch (error) {
+      console.error('Failed to send query:', error)
+      chatStore.addErrorMessage(
+        `쿼리 전송 실패: ${error instanceof Error ? error.message : '알 수 없는 오류'}`
+      )
+      chatStore.setLoading(false)
+      return
+    }
 
     // Scroll to bottom
     setTimeout(scrollToBottom, 100)
@@ -1066,7 +1181,21 @@
 
   function handleCancel() {
     wsClient?.cancel()
+    // Clear query timeout when user cancels
+    if (queryTimeout) {
+      clearTimeout(queryTimeout)
+      queryTimeout = null
+    }
   }
+
+  function resetFilters() {
+    selectedService = 'all'
+    selectedTimeRange = 'all'
+    customTimeRange = null
+  }
+
+  // Check if filters are modified from default
+  $: filtersModified = selectedService !== 'all' || selectedTimeRange !== 'all' || customTimeRange !== null
 
   function scrollToBottom() {
     if (chatContainer) {
@@ -1466,12 +1595,29 @@
   <div class="border-t border-gray-200 bg-white p-4">
     <div class="max-w-5xl mx-auto">
       <!-- Service and Time Range Filters -->
-      <ServiceFilter
-        bind:selectedService={selectedService}
-        bind:selectedTimeRange={selectedTimeRange}
-        bind:customTimeRange={customTimeRange}
-        disabled={isLoading}
-      />
+      <div class="flex items-center mb-3">
+        <div>
+          <ServiceFilter
+            bind:selectedService={selectedService}
+            bind:selectedTimeRange={selectedTimeRange}
+            bind:customTimeRange={customTimeRange}
+            disabled={isLoading}
+          />
+        </div>
+        {#if filtersModified}
+          <button
+            on:click={resetFilters}
+            disabled={isLoading}
+            class="ml-2 px-3 py-1.5 text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
+            title="필터 초기화"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </svg>
+            초기화
+          </button>
+        {/if}
+      </div>
 
       <!-- Sample Queries -->
       <div class="mb-3">

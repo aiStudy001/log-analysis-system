@@ -9,8 +9,11 @@
 """
 import json
 import re
+import logging
 from app.agent.state import AgentState
 from app.agent.llm_factory import get_llm
+
+logger = logging.getLogger(__name__)
 
 
 async def get_available_services_from_db(query_repo) -> list[str]:
@@ -22,6 +25,9 @@ async def get_available_services_from_db(query_repo) -> list[str]:
 
     Returns:
         서비스명 목록 (예: ["payment-api", "order-api", "user-api"])
+
+    Raises:
+        RuntimeError: DB 조회 실패 시
     """
     try:
         # DB에서 DISTINCT service 조회
@@ -35,9 +41,9 @@ async def get_available_services_from_db(query_repo) -> list[str]:
         else:
             return []
     except Exception as e:
-        # 실패 시 빈 배열 반환 (재질문 건너뜀)
-        print(f"⚠️ Failed to fetch services from DB: {e}")
-        return []
+        logger.error(f"Failed to fetch services from DB: {e}", exc_info=True)
+        # Raise exception instead of returning empty array - caller should handle
+        raise RuntimeError(f"서비스 목록 조회 실패: {str(e)}")
 
 
 async def clarification_node(state: AgentState, query_repo=None) -> dict:
@@ -152,18 +158,33 @@ async def clarification_node(state: AgentState, query_repo=None) -> dict:
 
         # 서비스 재질문
         if analysis.get("needs_service_clarification", False):
-            # 동적으로 서비스 목록 가져오기 (DB에서 실제 존재하는 서비스)
-            available_services = await get_available_services_from_db(query_repo)
+            try:
+                # 동적으로 서비스 목록 가져오기 (DB에서 실제 존재하는 서비스)
+                available_services = await get_available_services_from_db(query_repo)
 
-            if available_services:  # 서비스 목록이 있을 때만 재질문
-                clarifications.append({
-                    "type": "missing_info",
-                    "field": "service",
-                    "question": "어떤 서비스의 로그를 분석할까요?",
-                    "options": available_services + ["전체"],  # 실제 서비스 + "전체"
-                    "required": False
-                })
-            # 서비스 목록이 없으면 재질문 건너뜀 (DB 조회 실패 등)
+                if available_services:  # 서비스 목록이 있을 때만 재질문
+                    clarifications.append({
+                        "type": "missing_info",
+                        "field": "service",
+                        "question": "어떤 서비스의 로그를 분석할까요?",
+                        "options": available_services + ["전체"],  # 실제 서비스 + "전체"
+                        "required": False
+                    })
+            except RuntimeError as e:
+                # DB 조회 실패 시 에러 이벤트 반환
+                logger.error(f"Clarification failed: {e}", exc_info=True)
+                return {
+                    "clarifications_needed": [],
+                    "events": [{
+                        "type": "clarification_failed",
+                        "node": "clarifier",
+                        "status": "failed",
+                        "data": {
+                            "error": str(e),
+                            "message": "재질문 생성 실패"
+                        }
+                    }]
+                }
 
         # 시간 재질문
         if analysis.get("needs_time_clarification", False):

@@ -102,7 +102,9 @@
       "Bash(docker run:*)",
       "Bash(npm init:*)",
       "Bash(npx playwright test:*)",
-      "Bash(docker tag:*)"
+      "Bash(docker tag:*)",
+      "Bash(pnpm install:*)",
+      "Bash(pnpm test)"
     ]
   }
 }

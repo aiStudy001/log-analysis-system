@@ -8,6 +8,9 @@ Runs background checks every 5 minutes.
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 import asyncio
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class AlertingService:
@@ -104,7 +107,17 @@ class AlertingService:
                         }
                     }
         except Exception as e:
-            print(f"Error in _check_error_rate_spike: {e}")
+            logger.error(f"Anomaly check failed: {e}", exc_info=True)
+            # Return error as alert to notify users
+            return {
+                "type": "anomaly_check_error",
+                "severity": "warning",
+                "message": "이상 탐지 실패: 데이터베이스 연결 오류",
+                "data": {
+                    "error": str(e),
+                    "check_type": "error_rate_spike"
+                }
+            }
 
         return None
 
@@ -112,10 +125,10 @@ class AlertingService:
         """
         Detect slow APIs (> 2 seconds)
         """
-        sql = f"""
+        sql = """
         SELECT path, service, AVG(duration_ms) as avg_duration, COUNT(*) as count
         FROM logs
-        WHERE duration_ms > {self._thresholds["slow_api_threshold"]}
+        WHERE duration_ms > $1
           AND path IS NOT NULL
           AND created_at > NOW() - INTERVAL '10 minutes'
           AND deleted = FALSE
@@ -126,7 +139,7 @@ class AlertingService:
         """
 
         try:
-            results, _ = await self._query_repo.execute_sql(sql)
+            results, _ = await self._query_repo.execute_sql(sql, [self._thresholds["slow_api_threshold"]])
 
             if results:
                 return {
@@ -138,7 +151,17 @@ class AlertingService:
                     }
                 }
         except Exception as e:
-            print(f"Error in _check_slow_apis: {e}")
+            logger.error(f"Anomaly check failed: {e}", exc_info=True)
+            # Return error as alert to notify users
+            return {
+                "type": "anomaly_check_error",
+                "severity": "warning",
+                "message": "이상 탐지 실패: 느린 API 검사 오류",
+                "data": {
+                    "error": str(e),
+                    "check_type": "slow_api"
+                }
+            }
 
         return None
 
@@ -160,14 +183,15 @@ class AlertingService:
             down_services = []
             for row in active_services:
                 service = row["service"]
-                sql_recent = f"""
+                sql_recent = """
                 SELECT COUNT(*) as count
                 FROM logs
-                WHERE service = '{service}'
-                  AND created_at > NOW() - INTERVAL '{self._thresholds["service_down_minutes"]} minutes'
+                WHERE service = $1
+                  AND created_at > NOW() - INTERVAL $2
                   AND deleted = FALSE
                 """
-                results, _ = await self._query_repo.execute_sql(sql_recent)
+                interval = f"{self._thresholds['service_down_minutes']} minutes"
+                results, _ = await self._query_repo.execute_sql(sql_recent, [service, interval])
 
                 if results and results[0]["count"] == 0:
                     down_services.append(service)
@@ -182,7 +206,17 @@ class AlertingService:
                     }
                 }
         except Exception as e:
-            print(f"Error in _check_service_down: {e}")
+            logger.error(f"Anomaly check failed: {e}", exc_info=True)
+            # Return error as alert to notify users
+            return {
+                "type": "anomaly_check_error",
+                "severity": "warning",
+                "message": "이상 탐지 실패: 서비스 상태 검사 오류",
+                "data": {
+                    "error": str(e),
+                    "check_type": "service_down"
+                }
+            }
 
         return None
 

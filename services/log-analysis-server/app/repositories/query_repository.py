@@ -13,7 +13,7 @@ from app.repositories.base import BaseRepository
 class QueryRepository(BaseRepository):
     """Handles SQL query execution with result formatting"""
 
-    async def execute_sql(self, sql: str) -> Tuple[List[Dict[str, Any]], float]:
+    async def execute_sql(self, sql: str, params: List[Any] = None) -> Tuple[List[Dict[str, Any]], float]:
         """
         Execute SQL query and return results with execution time
 
@@ -22,15 +22,19 @@ class QueryRepository(BaseRepository):
         - Decimal → float
 
         Args:
-            sql: SQL query to execute
+            sql: SQL query to execute (use $1, $2, etc. for parameters)
+            params: Optional list of parameters for the query
 
         Returns:
             Tuple of (results_list, execution_time_ms)
         """
         start_time = time.time()
 
-        # Execute query
-        rows = await self.execute_query(sql)
+        # Execute query with optional parameters
+        if params:
+            rows = await self.execute_query(sql, *params)
+        else:
+            rows = await self.execute_query(sql)
 
         # Convert asyncpg Record to dict with type handling
         results_list = []

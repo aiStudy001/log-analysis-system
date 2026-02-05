@@ -1,6 +1,7 @@
 <script lang="ts">
   import { historyStore } from '../lib/stores/history'
   import { chatStore } from '../lib/stores/chat'
+  import { alertStore } from '../lib/stores/alert'
   import { push } from 'svelte-spa-router'
   import { get } from 'svelte/store'
 
@@ -62,8 +63,18 @@
       chatStore.clear()
     }
 
-    // Navigate to home
-    push('/')
+    // Navigate to home with error handling
+    try {
+      push('/')
+    } catch (error) {
+      console.error('Navigation failed:', error)
+      alertStore.addAlert({
+        type: 'alert',
+        severity: 'error',
+        message: '페이지 이동 실패. 새로고침 후 다시 시도해주세요.',
+        data: { error: error instanceof Error ? error.message : 'Unknown error' }
+      })
+    }
   }
 
   function formatDate(date: Date): string {

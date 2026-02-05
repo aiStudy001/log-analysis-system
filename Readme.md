@@ -597,8 +597,8 @@ log-analysis-system/
 ### Prerequisites (사전 요구사항)
 
 - **Docker & Docker Compose**: 최신 버전
-- **Node.js 18+**: 프론트엔드 개발
-- **Python 3.8+**: 백엔드 개발
+- **Node.js 22+**: 프론트엔드 개발
+- **Python 3.13+**: 백엔드 개발
 - **PostgreSQL Client**: 데이터베이스 접근 (psql)
 - **Claude API Key**: Text-to-SQL 기능 ([Anthropic Console](https://console.anthropic.com))
 

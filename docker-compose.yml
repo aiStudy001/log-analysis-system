@@ -1,0 +1,144 @@
+version: '3.8'
+
+services:
+  # PostgreSQL 데이터베이스
+  postgres:
+    image: postgres:15
+    container_name: log-analysis-db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-logs_db}
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+      # 한글 인코딩 설정
+      LC_ALL: C.UTF-8
+      LANG: C.UTF-8
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --locale=C"
+    ports:
+      - "5433:5432"  # 호스트:5433, 컨테이너:5432
+    volumes:
+      # 스키마 자동 생성 (컨테이너 시작 시 자동 실행)
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+      # 데이터 영속성
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - log-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1G
+        reservations:
+          memory: 512M
+    restart: unless-stopped
+
+  # FastAPI 로그 저장 서버
+  log-save-server:
+    build:
+      context: ./services/log-save-server
+      dockerfile: Dockerfile
+    container_name: log-save-server
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env                              # DB 공통 설정
+      - ./services/log-save-server/.env   # 서비스 전용 설정
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - log-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          memory: 256M
+    restart: unless-stopped
+
+  # FastAPI 로그 분석 서버 (Text-to-SQL)
+  log-analysis-server:
+    build:
+      context: ./services/log-analysis-server
+      dockerfile: Dockerfile
+    container_name: log-analysis-server
+    ports:
+      - "8001:8000"
+    env_file:
+      - .env                                  # DB 공통 설정
+      - ./services/log-analysis-server/.env   # 서비스 전용 설정
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/').read()"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    networks:
+      - log-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          memory: 512M
+    restart: unless-stopped
+
+  # Frontend (Svelte + Nginx)
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: log-analysis-frontend
+    ports:
+      - "3000:80"  # Access frontend at http://localhost:3000
+    depends_on:
+      log-analysis-server:
+        condition: service_healthy
+    networks:
+      - log-network
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  postgres_data:
+
+networks:
+  log-network:
+    driver: bridge

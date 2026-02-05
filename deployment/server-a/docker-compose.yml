@@ -1,0 +1,84 @@
+version: '3.8'
+
+services:
+  # PostgreSQL 데이터베이스
+  postgres:
+    image: postgres:15
+    container_name: log-analysis-db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-logs_db}
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+      # 한글 인코딩 설정
+      LC_ALL: C.UTF-8
+      LANG: C.UTF-8
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --locale=C"
+    ports:
+      - "5433:5432"  # 호스트:5433, 컨테이너:5432 (포트 충돌 방지)
+    volumes:
+      # 스키마 자동 생성
+      - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+      # 데이터 영속성
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - log-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1G
+        reservations:
+          memory: 512M
+    restart: unless-stopped
+
+  # FastAPI 로그 저장 서버
+  log-save-server:
+    image: ljh0/log-save-server:latest
+    container_name: log-save-server
+    ports:
+      - "8000:8000"
+    environment:
+      # DB 연결 (로컬)
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_NAME: ${POSTGRES_DB:-logs_db}
+      DATABASE_USER: ${POSTGRES_USER:-postgres}
+      DATABASE_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_POOL_MIN_SIZE: 10
+      DB_POOL_MAX_SIZE: 20
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - log-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          memory: 256M
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+
+networks:
+  log-network:
+    driver: bridge

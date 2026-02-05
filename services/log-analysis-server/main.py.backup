@@ -1,0 +1,402 @@
+"""
+FastAPI 로그 분석 서버
+
+기능:
+- Text-to-SQL 자연어 질의 (LangGraph Agent)
+- 로그 통계 조회
+- 읽기 전용 DB 접근
+"""
+
+import os
+from datetime import datetime
+from typing import List, Dict, Any, Optional
+
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+import asyncpg
+import asyncio
+from pydantic import BaseModel
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+# Import LangGraph Agent
+from agent import run_sql_query, create_sql_agent
+from agent.state import AgentState
+
+
+# Pydantic 모델
+class QueryRequest(BaseModel):
+    question: str
+    max_results: Optional[int] = 100
+
+
+class QueryResponse(BaseModel):
+    sql: str
+    results: List[Dict[str, Any]]
+    count: int
+    displayed: int
+    truncated: bool
+    execution_time_ms: float
+    insight: Optional[str] = None
+    error: Optional[str] = None
+
+
+# FastAPI 앱
+app = FastAPI(
+    title="Log Analysis Server",
+    version="2.0.0",
+    description="Text-to-SQL Agent powered by LangGraph + Claude Sonnet 4.5"
+)
+
+# CORS 설정
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# DB Connection Pool (읽기 전용)
+pool: Optional[asyncpg.Pool] = None
+
+
+@app.on_event("startup")
+async def startup():
+    """서버 시작 시 DB Connection Pool 생성"""
+    global pool
+    pool = await asyncpg.create_pool(
+        host=os.getenv("DATABASE_HOST", "localhost"),
+        port=int(os.getenv("DATABASE_PORT", "5432")),
+        database=os.getenv("DATABASE_NAME", "logs_db"),
+        user=os.getenv("DATABASE_USER", "postgres"),
+        password=os.getenv("DATABASE_PASSWORD", "password"),
+        min_size=int(os.getenv("DB_POOL_MIN_SIZE", "5")),
+        max_size=int(os.getenv("DB_POOL_MAX_SIZE", "10"))
+    )
+    print("✅ Database connection pool created (Read-Only)")
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    """서버 종료 시 Connection Pool 정리"""
+    global pool
+    if pool:
+        await pool.close()
+        print("✅ Database connection pool closed")
+
+
+@app.get("/")
+async def root():
+    """헬스 체크"""
+    return {"status": "ok", "service": "log-analysis-server"}
+
+
+@app.get("/services")
+async def get_services():
+    """서비스 목록 조회 (DB에서 실제 서비스명 추출)"""
+    if not pool:
+        raise HTTPException(status_code=500, detail="Database pool not initialized")
+
+    async with pool.acquire() as conn:
+        services = await conn.fetch(
+            """
+            SELECT DISTINCT service as name, COUNT(*) as log_count
+            FROM logs
+            WHERE deleted = FALSE
+            GROUP BY service
+            ORDER BY service
+            """
+        )
+
+        return {
+            "services": [
+                {"name": row["name"], "log_count": row["log_count"]}
+                for row in services
+            ]
+        }
+
+
+@app.get("/stats")
+async def get_stats():
+    """로그 통계 조회"""
+    if not pool:
+        raise HTTPException(status_code=500, detail="Database pool not initialized")
+
+    async with pool.acquire() as conn:
+        # 전체 로그 개수
+        total_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM logs WHERE deleted = FALSE"
+        )
+
+        # 레벨별 개수
+        level_counts = await conn.fetch(
+            """
+            SELECT level, COUNT(*) as count
+            FROM logs
+            WHERE deleted = FALSE
+            GROUP BY level
+            ORDER BY count DESC
+            """
+        )
+
+        # 서비스별 개수
+        service_counts = await conn.fetch(
+            """
+            SELECT service, COUNT(*) as count
+            FROM logs
+            WHERE deleted = FALSE
+            GROUP BY service
+            ORDER BY count DESC
+            LIMIT 10
+            """
+        )
+
+        # 최근 1시간 에러
+        recent_errors = await conn.fetchval(
+            """
+            SELECT COUNT(*) FROM logs
+            WHERE level = 'ERROR'
+              AND created_at > NOW() - INTERVAL '1 hour'
+              AND deleted = FALSE
+            """
+        )
+
+        return {
+            "total_logs": total_count,
+            "level_distribution": [
+                {"level": row["level"], "count": row["count"]}
+                for row in level_counts
+            ],
+            "service_distribution": [
+                {"service": row["service"], "count": row["count"]}
+                for row in service_counts
+            ],
+            "recent_errors_1h": recent_errors
+        }
+
+
+@app.post("/query", response_model=QueryResponse)
+async def query_logs(request: QueryRequest):
+    """
+    Text-to-SQL 자연어 질의 (LangGraph Agent)
+
+    Examples:
+        - "최근 1시간 에러 로그"
+        - "payment-api에서 가장 많이 발생한 에러 top 5"
+        - "user_123의 전체 여정 추적"
+        - "느린 API 찾기 (1초 이상)"
+    """
+    try:
+        # LangGraph Agent 실행
+        result = await run_sql_query(
+            question=request.question,
+            max_results=request.max_results
+        )
+
+        # 에러 처리
+        if result.get("error"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Query failed: {result['error']}"
+            )
+
+        return QueryResponse(
+            sql=result["sql"],
+            results=result["results"],
+            count=result["count"],
+            displayed=result.get("displayed", result["count"]),
+            truncated=result.get("truncated", False),
+            execution_time_ms=result["execution_time_ms"],
+            insight=result.get("insight"),
+            error=None
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal server error: {str(e)}"
+        )
+
+
+@app.websocket("/ws/query")
+async def websocket_query(websocket: WebSocket):
+    """
+    WebSocket endpoint for streaming Text-to-SQL queries
+
+    Message Types (Server → Client):
+        - {"type": "node_start", "node": "retrieve_schema"}
+        - {"type": "node_end", "node": "retrieve_schema"}
+        - {"type": "token", "content": "S"}
+        - {"type": "complete", "sql": "...", "results": [...], ...}
+        - {"type": "error", "message": "..."}
+        - {"type": "cancelled", "message": "..."}
+
+    Message Types (Client → Server):
+        - {"action": "query", "question": "...", "max_results": 100}
+        - {"action": "cancel"}
+    """
+    await websocket.accept()
+    task = None
+
+    try:
+        while True:
+            # Receive message from client
+            data = await websocket.receive_json()
+            action = data.get("action")
+
+            if action == "query":
+                question = data.get("question")
+                max_results = data.get("max_results", 100)
+
+                # Cancel previous task if running
+                if task and not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+
+                # Start new streaming query
+                task = asyncio.create_task(
+                    stream_sql_query(websocket, question, max_results)
+                )
+
+            elif action == "cancel":
+                if task and not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        await websocket.send_json({
+                            "type": "cancelled",
+                            "message": "Query cancelled by user"
+                        })
+
+    except WebSocketDisconnect:
+        if task and not task.done():
+            task.cancel()
+    except Exception as e:
+        try:
+            await websocket.send_json({
+                "type": "error",
+                "message": str(e)
+            })
+        except:
+            pass
+        finally:
+            try:
+                await websocket.close()
+            except:
+                pass
+
+
+async def stream_sql_query(websocket: WebSocket, question: str, max_results: int):
+    """
+    Stream LangGraph agent execution to WebSocket client
+
+    Uses astream_events() to capture all agent events including:
+    - Node start/end
+    - LLM token streaming
+    """
+    try:
+        agent = create_sql_agent()
+
+        initial_state: AgentState = {
+            "question": question,
+            "max_results": max_results,
+            "schema_info": "",
+            "sample_data": "",
+            "generated_sql": "",
+            "validation_error": "",
+            "retry_count": 0,
+            "query_results": [],
+            "execution_time_ms": 0.0,
+            "error_message": "",
+            "formatted_results": {},
+            "insight": "",
+            "messages": []
+        }
+
+        current_node = None
+
+        # Stream events from LangGraph
+        async for event in agent.astream_events(initial_state, version="v2"):
+            event_type = event.get("event")
+
+            # Node execution events
+            if event_type == "on_chain_start":
+                node_name = event.get("name")
+                if node_name and node_name != "LangGraph":
+                    current_node = node_name
+                    await websocket.send_json({
+                        "type": "node_start",
+                        "node": node_name
+                    })
+
+            elif event_type == "on_chain_end":
+                node_name = event.get("name")
+                if node_name and node_name == current_node:
+                    await websocket.send_json({
+                        "type": "node_end",
+                        "node": node_name
+                    })
+                    current_node = None
+
+            # LLM streaming tokens
+            elif event_type == "on_chat_model_stream":
+                chunk = event.get("data", {}).get("chunk")
+                if chunk and hasattr(chunk, "content"):
+                    content = chunk.content
+                    if content:
+                        await websocket.send_json({
+                            "type": "token",
+                            "content": content
+                        })
+
+        # Get final state
+        final_state = await agent.ainvoke(initial_state)
+
+        # Send complete result
+        if final_state.get("error_message"):
+            await websocket.send_json({
+                "type": "error",
+                "message": final_state["error_message"]
+            })
+        elif final_state.get("validation_error") and final_state.get("retry_count", 0) >= 3:
+            await websocket.send_json({
+                "type": "error",
+                "message": f"SQL validation failed after 3 retries: {final_state['validation_error']}"
+            })
+        else:
+            await websocket.send_json({
+                "type": "complete",
+                "sql": final_state["generated_sql"],
+                "results": final_state["formatted_results"].get("data", []),
+                "count": final_state["formatted_results"].get("count", 0),
+                "displayed": final_state["formatted_results"].get("displayed", 0),
+                "truncated": final_state["formatted_results"].get("truncated", False),
+                "execution_time_ms": final_state["execution_time_ms"],
+                "insight": final_state["insight"]
+            })
+
+    except asyncio.CancelledError:
+        await websocket.send_json({
+            "type": "cancelled",
+            "message": "Query cancelled"
+        })
+    except Exception as e:
+        await websocket.send_json({
+            "type": "error",
+            "message": str(e)
+        })
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8001)

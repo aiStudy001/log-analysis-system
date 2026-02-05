@@ -1,0 +1,803 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Todo App - Log Collector Demo</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+        }
+
+        .card {
+            background: white;
+            border-radius: 12px;
+            padding: 24px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.1);
+            margin-bottom: 20px;
+        }
+
+        h1 {
+            color: #333;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+
+        .login-form, .todo-app {
+            display: none;
+        }
+
+        .login-form.active, .todo-app.active {
+            display: block;
+        }
+
+        input[type="text"], input[type="password"] {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+            margin-bottom: 12px;
+            transition: border-color 0.3s;
+        }
+
+        input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        button {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+            transition: background 0.3s;
+        }
+
+        button:hover {
+            background: #5568d3;
+        }
+
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+
+        .btn-secondary {
+            background: #6c757d;
+        }
+
+        .btn-secondary:hover {
+            background: #5a6268;
+        }
+
+        .btn-danger {
+            background: #dc3545;
+        }
+
+        .btn-danger:hover {
+            background: #c82333;
+        }
+
+        .btn-small {
+            padding: 6px 12px;
+            font-size: 12px;
+        }
+
+        .todo-input-group {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 20px;
+        }
+
+        .todo-input-group input {
+            flex: 1;
+            margin-bottom: 0;
+        }
+
+        .todo-list {
+            list-style: none;
+        }
+
+        .todo-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            margin-bottom: 8px;
+            transition: all 0.3s;
+        }
+
+        .todo-item:hover {
+            border-color: #667eea;
+            box-shadow: 0 2px 8px rgba(102, 126, 234, 0.1);
+        }
+
+        .todo-item.completed {
+            opacity: 0.6;
+        }
+
+        .todo-item.completed .todo-text {
+            text-decoration: line-through;
+        }
+
+        .todo-checkbox {
+            width: 20px;
+            height: 20px;
+            cursor: pointer;
+        }
+
+        .todo-text {
+            flex: 1;
+            color: #333;
+        }
+
+        .test-buttons {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin-top: 20px;
+        }
+
+        .user-info {
+            text-align: center;
+            padding: 12px;
+            background: #f8f9fa;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+
+        .user-info strong {
+            color: #667eea;
+        }
+
+        .status {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background: #28a745;
+            color: white;
+            padding: 12px 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+            display: none;
+        }
+
+        .status.show {
+            display: block;
+            animation: slideIn 0.3s ease;
+        }
+
+        @keyframes slideIn {
+            from {
+                transform: translateX(400px);
+                opacity: 0;
+            }
+            to {
+                transform: translateX(0);
+                opacity: 1;
+            }
+        }
+
+        .error {
+            color: #dc3545;
+            font-size: 14px;
+            margin-top: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- 로그인 폼 -->
+        <div class="login-form active">
+            <div class="card">
+                <h1>🔐 로그인</h1>
+                <form id="loginForm">
+                    <input type="text" id="username" placeholder="Username (demo)" required>
+                    <input type="password" id="password" placeholder="Password (demo123)" required>
+                    <button type="submit">로그인</button>
+                    <div id="loginError" class="error"></div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Todo 앱 -->
+        <div class="todo-app">
+            <div class="card">
+                <div class="user-info">
+                    <span>👤 <strong id="currentUser"></strong></span>
+                    <button class="btn-small btn-secondary" onclick="logout()" style="margin-left: 12px;">로그아웃</button>
+                </div>
+
+                <h1>📝 Todo List</h1>
+
+                <div class="todo-input-group">
+                    <input type="text" id="todoInput" placeholder="새 할 일 입력...">
+                    <button onclick="addTodo()">추가</button>
+                </div>
+
+                <ul class="todo-list" id="todoList"></ul>
+
+                <div class="test-buttons">
+                    <button class="btn-small" onclick="runFullTest()" style="background: #28a745;">🚀 전체 기능 테스트</button>
+                    <button class="btn-danger btn-small" onclick="testError()">❌ 에러 테스트</button>
+                    <button class="btn-secondary btn-small" onclick="testSlowApi()">⏱️ 타이머 테스트</button>
+                    <button class="btn-secondary btn-small" onclick="testBatchLogs()">📦 배치 로그 테스트</button>
+                    <button class="btn-secondary btn-small" onclick="testTracing()">🔍 분산 추적 테스트</button>
+                    <button class="btn-secondary btn-small" onclick="testAllLogLevels()">📊 로그 레벨 테스트</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="status" id="status"></div>
+
+    <script type="module">
+        // 브라우저에서 log-client-async 사용
+        // 실제로는 번들러를 통해 import해야 하지만, 데모를 위해 CDN이나 로컬 빌드 사용
+        // 여기서는 간단히 fetch API로 대체
+
+        const API_URL = 'http://localhost:3002/api';
+        let currentUser = null;
+        let currentTraceId = null;
+
+        // ============================================================================
+        // 로거 생성 (enableGlobalErrorHandler 옵션 포함)
+        // ============================================================================
+        class SimpleLogger {
+            constructor(options = {}) {
+                this.service = options.service || 'demo-todo-frontend-python';
+                this.environment = options.environment || 'development';
+                this.logType = options.logType || 'FRONTEND';
+                this.enableGlobalErrorHandler = options.enableGlobalErrorHandler !== undefined
+                    ? options.enableGlobalErrorHandler
+                    : false;
+
+                // 글로벌 에러 핸들러 설정
+                if (this.enableGlobalErrorHandler) {
+                    this._setupGlobalErrorHandler();
+                }
+            }
+
+            _setupGlobalErrorHandler() {
+                window.addEventListener('error', (event) => {
+                    this.error('Uncaught error', {
+                        message: event.message,
+                        source: event.filename,
+                        line: event.lineno,
+                        column: event.colno,
+                        stack: event.error ? event.error.stack : 'N/A',
+                        error_type: 'UncaughtError'
+                    });
+                });
+
+                window.addEventListener('unhandledrejection', (event) => {
+                    this.error('Unhandled promise rejection', {
+                        reason: String(event.reason),
+                        stack: event.reason && event.reason.stack ? event.reason.stack : 'N/A',
+                        error_type: 'UnhandledRejection'
+                    });
+                });
+            }
+
+            log(level, message, metadata = {}) {
+                console.log(`[${level}] ${message}`, metadata);
+
+                const logEntry = {
+                    level,
+                    message,
+                    created_at: Date.now() / 1000,
+                    service: this.service,
+                    environment: this.environment,
+                    log_type: this.logType,
+                    ...metadata
+                };
+
+                fetch('http://localhost:8000/logs', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ logs: [logEntry] })
+                }).catch(err => console.error('Log send failed:', err));
+            }
+
+            info(msg, meta) { this.log('INFO', msg, meta); }
+            warn(msg, meta) { this.log('WARN', msg, meta); }
+            error(msg, meta) { this.log('ERROR', msg, meta); }
+        }
+
+        // 로거 인스턴스 생성 (글로벌 에러 핸들러 활성화)
+        const logger = new SimpleLogger({
+            enableGlobalErrorHandler: true  // 모든 에러를 자동으로 로깅
+        });
+
+        // 상태 메시지 표시
+        window.showStatus = function(message) {
+            const status = document.getElementById('status');
+            status.textContent = message;
+            status.classList.add('show');
+            setTimeout(() => status.classList.remove('show'), 3000);
+        }
+
+        // 로그인
+        document.getElementById('loginForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+
+            logger.info('Login attempt', { username });
+
+            try {
+                const res = await fetch(`${API_URL}/login`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password })
+                });
+
+                const data = await res.json();
+
+                if (!res.ok) {
+                    throw new Error(data.error);
+                }
+
+                currentUser = data.user;
+                currentTraceId = data.traceId;
+
+                logger.info('Login successful', { user_id: currentUser.id });
+
+                document.querySelector('.login-form').classList.remove('active');
+                document.querySelector('.todo-app').classList.add('active');
+                document.getElementById('currentUser').textContent = currentUser.username;
+
+                loadTodos();
+                showStatus('로그인 성공!');
+
+            } catch (err) {
+                logger.error('Login failed', { error: err.message });
+                document.getElementById('loginError').textContent = err.message;
+            }
+        });
+
+        // Todo 로드
+        window.loadTodos = async function() {
+            logger.info('Loading todos');
+
+            try {
+                const res = await fetch(`${API_URL}/todos`, {
+                    headers: {
+                        'x-user-id': currentUser.id,
+                        'x-trace-id': currentTraceId
+                    }
+                });
+
+                const data = await res.json();
+                const todoList = document.getElementById('todoList');
+                todoList.innerHTML = '';
+
+                data.todos.forEach(todo => {
+                    const li = document.createElement('li');
+                    li.className = `todo-item ${todo.completed ? 'completed' : ''}`;
+                    li.innerHTML = `
+                        <input type="checkbox" class="todo-checkbox"
+                               ${todo.completed ? 'checked' : ''}
+                               onchange="toggleTodo('${todo.id}')">
+                        <span class="todo-text">${todo.text}</span>
+                        <button class="btn-danger btn-small" onclick="deleteTodo('${todo.id}')">삭제</button>
+                    `;
+                    todoList.appendChild(li);
+                });
+
+                logger.info('Todos loaded', { count: data.todos.length });
+
+            } catch (err) {
+                logger.error('Failed to load todos', { error: err.message });
+            }
+        }
+
+        // Todo 추가
+        window.addTodo = async function() {
+            const input = document.getElementById('todoInput');
+            const text = input.value.trim();
+
+            if (!text) return;
+
+            logger.info('Adding todo', { text });
+
+            try {
+                const res = await fetch(`${API_URL}/todos`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'x-user-id': currentUser.id,
+                        'x-trace-id': currentTraceId
+                    },
+                    body: JSON.stringify({ text })
+                });
+
+                const data = await res.json();
+
+                logger.info('Todo added', { todo_id: data.todo.id });
+
+                input.value = '';
+                loadTodos();
+                showStatus('Todo 추가됨!');
+
+            } catch (err) {
+                logger.error('Failed to add todo', { error: err.message });
+            }
+        }
+
+        // Todo 완료 토글
+        window.toggleTodo = async function(id) {
+            logger.info('Toggling todo', { todo_id: id });
+
+            try {
+                await fetch(`${API_URL}/todos/${id}`, {
+                    method: 'PUT',
+                    headers: {
+                        'x-user-id': currentUser.id,
+                        'x-trace-id': currentTraceId
+                    }
+                });
+
+                logger.info('Todo toggled', { todo_id: id });
+
+                loadTodos();
+                showStatus('Todo 업데이트됨!');
+
+            } catch (err) {
+                logger.error('Failed to toggle todo', { error: err.message });
+            }
+        }
+
+        // Todo 삭제
+        window.deleteTodo = async function(id) {
+            logger.info('Deleting todo', { todo_id: id });
+
+            try {
+                await fetch(`${API_URL}/todos/${id}`, {
+                    method: 'DELETE',
+                    headers: {
+                        'x-user-id': currentUser.id,
+                        'x-trace-id': currentTraceId
+                    }
+                });
+
+                logger.info('Todo deleted', { todo_id: id });
+
+                loadTodos();
+                showStatus('Todo 삭제됨!');
+
+            } catch (err) {
+                logger.error('Failed to delete todo', { error: err.message });
+            }
+        }
+
+        // 에러 테스트
+        window.testError = async function() {
+            logger.info('Testing error endpoint');
+
+            try {
+                const res = await fetch(`${API_URL}/error`, {
+                    headers: {
+                        'x-user-id': currentUser.id,
+                        'x-trace-id': currentTraceId
+                    }
+                });
+
+                const data = await res.json();
+                logger.error('Error response received', { error: data.message });
+                showStatus('에러 발생! 로그 확인하세요.');
+
+            } catch (err) {
+                logger.error('Error test failed', { error: err.message });
+            }
+        }
+
+        // 느린 API 테스트
+        window.testSlowApi = async function() {
+            logger.info('Testing slow API');
+            showStatus('느린 API 호출 중... (2초)');
+
+            const startTime = Date.now();
+
+            try {
+                await fetch(`${API_URL}/slow`, {
+                    headers: {
+                        'x-user-id': currentUser.id,
+                        'x-trace-id': currentTraceId
+                    }
+                });
+
+                const duration = Date.now() - startTime;
+                logger.info('Slow API completed', { duration_ms: duration });
+                showStatus(`완료! (${duration}ms)`);
+
+            } catch (err) {
+                logger.error('Slow API test failed', { error: err.message });
+            }
+        }
+
+        // 배치 로그 테스트 - 여러 로그를 한 번에 전송
+        window.testBatchLogs = async function() {
+            showStatus('배치 로그 전송 중...');
+            logger.info('Starting batch log test');
+
+            try {
+                // 100개의 로그를 빠르게 생성
+                for (let i = 0; i < 100; i++) {
+                    logger.info(`Batch log ${i + 1}`, {
+                        batch_number: i + 1,
+                        test_type: 'batch',
+                        user_id: currentUser ? currentUser.id : 'anonymous'
+                    });
+                }
+
+                logger.info('Batch log test completed', { total_logs: 100 });
+                showStatus('100개 로그 전송 완료!');
+
+            } catch (err) {
+                logger.error('Batch log test failed', { error: err.message });
+            }
+        }
+
+        // 분산 추적 테스트 - trace_id를 통한 요청 추적
+        window.testTracing = async function() {
+            showStatus('분산 추적 테스트 중...');
+            const traceId = 'trace_' + Date.now();
+
+            logger.info('Starting distributed tracing test', { trace_id: traceId });
+
+            try {
+                // 여러 API를 같은 trace_id로 호출
+                await fetch(`${API_URL}/todos`, {
+                    headers: {
+                        'x-user-id': currentUser.id,
+                        'x-trace-id': traceId
+                    }
+                });
+
+                await fetch(`${API_URL}/slow`, {
+                    headers: {
+                        'x-user-id': currentUser.id,
+                        'x-trace-id': traceId
+                    }
+                });
+
+                logger.info('Distributed tracing test completed', {
+                    trace_id: traceId,
+                    message: `Check logs with trace_id=${traceId} to see all related requests`
+                });
+                showStatus(`추적 완료! trace_id: ${traceId.substring(0, 12)}...`);
+
+            } catch (err) {
+                logger.error('Tracing test failed', { error: err.message, trace_id: traceId });
+            }
+        }
+
+        // 모든 로그 레벨 테스트
+        window.testAllLogLevels = async function() {
+            showStatus('모든 로그 레벨 테스트 중...');
+
+            try {
+                // INFO 로그
+                logger.info('This is an INFO level log', {
+                    test_type: 'log_levels',
+                    level_tested: 'INFO'
+                });
+
+                // WARN 로그
+                logger.warn('This is a WARN level log', {
+                    test_type: 'log_levels',
+                    level_tested: 'WARN',
+                    warning_reason: 'Testing warning scenarios'
+                });
+
+                // ERROR 로그
+                logger.error('This is an ERROR level log', {
+                    test_type: 'log_levels',
+                    level_tested: 'ERROR',
+                    error_reason: 'Testing error scenarios'
+                });
+
+                logger.info('All log levels tested', {
+                    levels: ['INFO', 'WARN', 'ERROR'],
+                    total: 3
+                });
+                showStatus('모든 로그 레벨 테스트 완료!');
+
+            } catch (err) {
+                logger.error('Log level test failed', { error: err.message });
+            }
+        }
+
+        // 로그아웃
+        window.logout = function() {
+            logger.info('Logging out', { user_id: currentUser.id });
+
+            currentUser = null;
+            currentTraceId = null;
+
+            document.querySelector('.todo-app').classList.remove('active');
+            document.querySelector('.login-form').classList.add('active');
+
+            document.getElementById('username').value = '';
+            document.getElementById('password').value = '';
+            document.getElementById('loginError').textContent = '';
+
+            showStatus('로그아웃됨!');
+        }
+
+        // Enter 키로 Todo 추가
+        document.getElementById('todoInput').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                addTodo();
+            }
+        });
+
+        // ============================================================================
+        // 전체 기능 테스트 - 모든 클라이언트 기능을 순차적으로 테스트
+        // ============================================================================
+        window.runFullTest = async function() {
+            logger.info('Starting full test suite');
+            showStatus('전체 테스트 시작...');
+
+            const results = {
+                passed: 0,
+                failed: 0,
+                tests: []
+            };
+
+            const runTest = async (name, testFn) => {
+                try {
+                    showStatus(`테스트 중: ${name}`);
+                    await testFn();
+                    results.passed++;
+                    results.tests.push({ name, status: 'PASS' });
+                    logger.info(`Test passed: ${name}`);
+                } catch (err) {
+                    results.failed++;
+                    results.tests.push({ name, status: 'FAIL', error: err.message });
+                    logger.error(`Test failed: ${name}`, { error: err.message, stack: err.stack });
+                }
+            };
+
+            try {
+                // 1. Todo 추가 테스트
+                await runTest('Todo 추가', async () => {
+                    const res = await fetch(`${API_URL}/todos`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'x-user-id': currentUser.id,
+                            'x-trace-id': currentTraceId
+                        },
+                        body: JSON.stringify({ text: 'Test Todo Item' })
+                    });
+                    if (!res.ok) throw new Error('Failed to create todo');
+                    const data = await res.json();
+                    window.testTodoId = data.todo.id;
+                });
+
+                // 2. Todo 리스트 조회 테스트
+                await runTest('Todo 리스트 조회', async () => {
+                    const res = await fetch(`${API_URL}/todos`, {
+                        headers: {
+                            'x-user-id': currentUser.id,
+                            'x-trace-id': currentTraceId
+                        }
+                    });
+                    if (!res.ok) throw new Error('Failed to fetch todos');
+                    const data = await res.json();
+                    if (!Array.isArray(data.todos)) throw new Error('Invalid response format');
+                });
+
+                // 3. Todo 완료 토글 테스트
+                await runTest('Todo 완료 토글', async () => {
+                    if (!window.testTodoId) throw new Error('No test todo ID available');
+                    const res = await fetch(`${API_URL}/todos/${window.testTodoId}`, {
+                        method: 'PUT',
+                        headers: {
+                            'x-user-id': currentUser.id,
+                            'x-trace-id': currentTraceId
+                        }
+                    });
+                    if (!res.ok) throw new Error('Failed to toggle todo');
+                });
+
+                // 4. Todo 삭제 테스트
+                await runTest('Todo 삭제', async () => {
+                    if (!window.testTodoId) throw new Error('No test todo ID available');
+                    const res = await fetch(`${API_URL}/todos/${window.testTodoId}`, {
+                        method: 'DELETE',
+                        headers: {
+                            'x-user-id': currentUser.id,
+                            'x-trace-id': currentTraceId
+                        }
+                    });
+                    if (!res.ok) throw new Error('Failed to delete todo');
+                });
+
+                // 5. 에러 엔드포인트 테스트
+                await runTest('에러 처리', async () => {
+                    const res = await fetch(`${API_URL}/error`, {
+                        headers: {
+                            'x-user-id': currentUser.id,
+                            'x-trace-id': currentTraceId
+                        }
+                    });
+                    // 에러 엔드포인트는 500을 반환해야 함
+                    if (res.status !== 500) throw new Error('Error endpoint should return 500');
+                });
+
+                // 6. 느린 API 테스트
+                await runTest('느린 API (타이머)', async () => {
+                    const startTime = Date.now();
+                    const res = await fetch(`${API_URL}/slow`, {
+                        headers: {
+                            'x-user-id': currentUser.id,
+                            'x-trace-id': currentTraceId
+                        }
+                    });
+                    if (!res.ok) throw new Error('Slow API failed');
+                    const duration = Date.now() - startTime;
+                    if (duration < 1500) throw new Error('API returned too quickly');
+                });
+
+                // UI 새로고침
+                await loadTodos();
+
+                // 결과 표시
+                const summary = `테스트 완료! 통과: ${results.passed}, 실패: ${results.failed}`;
+                showStatus(summary);
+                logger.info('Full test completed', {
+                    total: results.tests.length,
+                    passed: results.passed,
+                    failed: results.failed,
+                    details: results.tests
+                });
+
+                // 콘솔에 상세 결과 출력
+                console.log('='.repeat(50));
+                console.log('전체 테스트 결과:');
+                results.tests.forEach(test => {
+                    const icon = test.status === 'PASS' ? '✅' : '❌';
+                    console.log(`${icon} ${test.name}: ${test.status}${test.error ? ` (${test.error})` : ''}`);
+                });
+                console.log('='.repeat(50));
+
+            } catch (err) {
+                logger.error('Full test suite failed', { error: err.message, stack: err.stack });
+                showStatus('테스트 중 오류 발생!');
+            }
+        }
+
+        // Enter 키로 Todo 추가
+        document.getElementById('todoInput').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                addTodo();
+            }
+        });
+    </script>
+</body>
+</html>

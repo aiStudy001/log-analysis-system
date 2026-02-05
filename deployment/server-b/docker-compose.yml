@@ -1,0 +1,76 @@
+version: '3.8'
+
+services:
+  # FastAPI 로그 분석 서버 (Text-to-SQL)
+  log-analysis-server:
+    image: ljh0/log-analysis-server:latest
+    container_name: log-analysis-server
+    ports:
+      - "8001:8000"
+    environment:
+      # DB 연결 (원격 - Server A)
+      DATABASE_HOST: ${DB_SERVER_A_HOST}
+      DATABASE_PORT: ${DB_SERVER_A_PORT:-5432}
+      DATABASE_NAME: ${POSTGRES_DB:-logs_db}
+      DATABASE_USER: ${POSTGRES_USER:-postgres}
+      DATABASE_PASSWORD: ${POSTGRES_PASSWORD}
+      # Connection Pool
+      DB_POOL_MIN_SIZE: 5
+      DB_POOL_MAX_SIZE: 10
+      # LLM Configuration
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      LLM_PROVIDER: ${LLM_PROVIDER:-openai}
+      LLM_MODEL_OPENAI: ${LLM_MODEL_OPENAI:-gpt-5-nano}
+      LLM_MODEL_ANTHROPIC: ${LLM_MODEL_ANTHROPIC:-claude-haiku-4-5}
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/').read()"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    networks:
+      - log-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          memory: 512M
+    restart: unless-stopped
+
+  # Frontend (Svelte + Nginx)
+  frontend:
+    image: ljh0/log-analysis-frontend:latest
+    container_name: log-analysis-frontend
+    ports:
+      - "80:80"  # Production: port 80
+    depends_on:
+      log-analysis-server:
+        condition: service_healthy
+    networks:
+      - log-network
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  log-network:
+    driver: bridge

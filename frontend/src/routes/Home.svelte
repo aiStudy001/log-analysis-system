@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte'
+  import { marked } from 'marked'
   import { chatStore } from '../lib/stores/chat'
   import { historyStore } from '../lib/stores/history'
   import { QueryWebSocket, type StreamEvent } from '../lib/api/websocket'
@@ -13,43 +14,21 @@
   import { alertStore } from '../lib/stores/alert'  // Feature #5
   import { getApiUrl } from '$lib/config'
 
-  // Simple markdown renderer (replaces marked library for production builds)
+  // Configure marked for safe HTML rendering
+  marked.setOptions({
+    breaks: true,  // Convert \n to <br>
+    gfm: true,     // GitHub Flavored Markdown
+  })
+
+  // Convert markdown to HTML using marked library
   function renderMarkdown(markdown: string): string {
     if (!markdown) return ''
-
-    let html = markdown
-      // Headers
-      .replace(/^### (.*$)/gim, '<h3>$1</h3>')
-      .replace(/^## (.*$)/gim, '<h2>$1</h2>')
-      .replace(/^# (.*$)/gim, '<h1>$1</h1>')
-      // Bold
-      .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-      .replace(/\_\_(.*?)\_\_/g, '<strong>$1</strong>')
-      // Italic
-      .replace(/\*(.*?)\*/g, '<em>$1</em>')
-      .replace(/\_(.*?)\_/g, '<em>$1</em>')
-      // Code blocks
-      .replace(/```(.*?)```/gs, '<pre><code>$1</code></pre>')
-      .replace(/`(.*?)`/g, '<code>$1</code>')
-      // Lists
-      .replace(/^\* (.*$)/gim, '<li>$1</li>')
-      .replace(/^- (.*$)/gim, '<li>$1</li>')
-      .replace(/^\d+\. (.*$)/gim, '<li>$1</li>')
-      // Links
-      .replace(/\[(.*?)\]\((.*?)\)/g, '<a href="$2">$1</a>')
-      // Line breaks
-      .replace(/\n\n/g, '</p><p>')
-      .replace(/\n/g, '<br>')
-
-    // Wrap lists
-    html = html.replace(/(<li>.*<\/li>)/s, '<ul>$1</ul>')
-
-    // Wrap in paragraph if not already wrapped
-    if (!html.startsWith('<')) {
-      html = '<p>' + html + '</p>'
+    try {
+      return marked.parse(markdown) as string
+    } catch (error) {
+      console.error('Markdown parsing error:', error)
+      return markdown  // Fallback to plain text
     }
-
-    return html
   }
 
   // Helper: Format time range for display (handles both string and object)

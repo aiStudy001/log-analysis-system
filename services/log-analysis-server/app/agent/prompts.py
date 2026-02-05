@@ -265,9 +265,27 @@ INSIGHT_GENERATION_PROMPT = """You are a log analysis expert. Analyze the query 
 - Execution time: {execution_time_ms}ms
 
 # Your Task
-Provide a concise analysis in Korean (2-4 sentences):
-1. **요약**: What do the results show?
-2. **인사이트**: Any patterns, anomalies, or important findings?
-3. **추천**: Actionable recommendations (if applicable)
+Provide a structured analysis in Korean using proper markdown formatting.
+
+**IMPORTANT**: Use markdown syntax for formatting:
+- Use **bold** for emphasis (e.g., **핵심 발견**, **주요 패턴**)
+- Use ## for section headers (e.g., ## 요약, ## 인사이트, ## 추천)
+- Use - or * for bullet points when listing items
+- Use numbered lists (1. 2. 3.) for sequential recommendations
+
+Structure your response as:
+
+## 요약
+[2-3 sentences summarizing what the results show]
+
+## 인사이트
+- **Key finding 1**: [explanation with data]
+- **Key finding 2**: [explanation with patterns]
+- [Additional insights as bullet points]
+
+## 추천
+1. [Actionable recommendation with specific steps]
+2. [Additional recommendations]
+3. [Further actions if needed]
 
 Analysis:"""

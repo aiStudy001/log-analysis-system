@@ -96,7 +96,10 @@
       "Bash(docker push:*)",
       "Bash(set:*)",
       "Bash(pnpm run build:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(pnpm list:*)",
+      "Bash(docker images:*)",
+      "Bash(docker run:*)"
     ]
   }
 }
